@@ -22,7 +22,25 @@ class MailboxTests(unittest.TestCase):
         replies = list((self.home / 'to-claude').glob('*.json'))
         self.assertEqual(json.loads(replies[0].read_text())['reply_to'], 'claude-one')
         self.incoming(); self.assertEqual(self.b.scan()['actions'], [])
-        self.assertEqual(len(replies), 1)
+        self.assertEqual(len(list((self.home / 'to-claude').glob('*.json'))), 1)
+    def test_reply_publish_recovers_after_restart(self):
+        self.incoming(); self.b.scan(); self.b.claim('claude-one')
+        def fail_publish(message):
+            raise OSError('simulated interrupted publication')
+        self.b.emit = fail_publish
+        with self.assertRaises(OSError):
+            self.b.complete('claude-one', 'durable answer')
+        self.b.db.close()
+        self.b = DesktopBridge(self.home, {'demo': 'chat-123'})
+        self.assertEqual(self.b.scan()['actions'], [])
+        reply = json.loads(next((self.home / 'to-claude').glob('*.json')).read_text())
+        self.assertEqual(reply['body'], 'durable answer')
+        self.assertEqual(reply['reply_to'], 'claude-one')
+    def test_response_project_must_match(self):
+        ident = self.b.send('demo', 'question', 'origin-chat')
+        self.incoming(type='response', reply_to=ident, project='different')
+        self.assertEqual(self.b.scan()['actions'], [])
+        self.assertIsNone(self.b.db.execute('SELECT response_id FROM outgoing').fetchone()[0])
     def test_restart_never_reclaims(self):
         self.incoming(); self.b.scan(); self.b.claim('claude-one'); self.b.db.close()
         self.b = DesktopBridge(self.home, {'demo': 'chat-123'})
