@@ -94,7 +94,7 @@ class DesktopBridge(Bridge):
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument('--home', type=Path, default=DEFAULT_HOME)
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('scan')
