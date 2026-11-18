@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 import time
+import tempfile
+import uuid
+import fcntl
 from codex_bridge import Bridge, DEFAULT_HOME
 
 
@@ -93,6 +96,45 @@ class DesktopBridge(Bridge):
         return {'completed': ident}
 
 
+def register_chat(home, project, chat_id, replace_chat_id=None):
+    """Atomically register a Codex destination without touching mailbox delivery state."""
+    if not project or project != project.strip():
+        raise ValueError('project must be a nonempty name without surrounding whitespace')
+    chat_id = str(uuid.UUID(chat_id))
+    state = Path(home) / 'state'
+    state.mkdir(parents=True, exist_ok=True)
+    config = state / 'codex-routes.json'
+    with (state / 'codex-routes.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        routes = json.loads(config.read_text()) if config.exists() else {}
+        if not isinstance(routes, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) and v for k, v in routes.items()):
+            raise ValueError('routes must map project names to chat IDs')
+        previous = routes.get(project)
+        if previous != chat_id:
+            if previous != replace_chat_id:
+                raise ValueError(f'route conflict for {project}: current destination is {previous!r}; '
+                                 'explicit replacement requires --replace-chat-id with that value')
+            routes[project] = chat_id
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(mode='w', dir=state, delete=False) as temp:
+                    temp_path = Path(temp.name)
+                    json.dump(routes, temp, indent=2)
+                    temp.write('\n')
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                os.replace(temp_path, config)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+        verified = json.loads(config.read_text())[project]
+        if verified != chat_id:
+            raise ValueError('registration read-back did not match')
+        return {'project': project, 'threadId': verified, 'registered': True,
+                'changed': previous != chat_id}
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument('--home', type=Path, default=DEFAULT_HOME)
@@ -101,8 +143,19 @@ def main():
     c = sub.add_parser('claim', allow_abbrev=False); c.add_argument('id')
     c = sub.add_parser('complete', allow_abbrev=False); c.add_argument('id'); c.add_argument('--body-file', type=Path, required=True)
     c = sub.add_parser('send', allow_abbrev=False); c.add_argument('--project', required=True); c.add_argument('--origin', required=True); c.add_argument('--body-file', type=Path, required=True)
+    c = sub.add_parser('register', allow_abbrev=False)
+    c.add_argument('--project', required=True)
+    c.add_argument('--chat-id', required=True)
+    c.add_argument('--replace-chat-id')
     args = p.parse_args()
     os.umask(0o077)
+    if args.command == 'register':
+        try:
+            result = register_chat(args.home, args.project, args.chat_id, args.replace_chat_id)
+        except (ValueError, OSError) as exc:
+            p.exit(1, f'{exc}\n')
+        print(json.dumps(result))
+        return
     b = DesktopBridge(args.home)
     try:
         if args.command == 'scan': result = b.scan()

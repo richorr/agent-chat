@@ -9,3 +9,4 @@
 - Idle polling doubles from 5 to 30 minutes and resets on activity.
 - Run `python3 -m unittest discover -s tests -v` before opening or merging a PR.
 - Standalone dispatcher runs start fresh; keep durable memory in SQLite, not chat history.
+- The portable registration skill is tracked in `.agents/skills/register-chat`, with a tracked `.claude/skills/register-chat` symlink. Codex registration uses `desktop_bridge.py register`; Claude verifies live coordinator discovery without changing its dispatcher. Personal registrations remain outside Git.
