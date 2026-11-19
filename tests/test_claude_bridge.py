@@ -1,0 +1,157 @@
+"""Tests for claude/bridge.py. The Haiku router is replaced with a stub; no model calls."""
+import argparse
+import importlib.util
+import json
+import os
+import shutil
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'claude' / 'bridge.py'
+
+
+def load_bridge(root):
+    os.environ['AGENT_BRIDGE_ROOT'] = str(root)
+    spec = importlib.util.spec_from_file_location('claude_bridge_under_test', str(SCRIPT))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for d in (mod.TO_CODEX, mod.TO_CLAUDE, mod.ARCHIVE, mod.TMP, mod.STATE):
+        os.makedirs(d, exist_ok=True)
+    return mod
+
+
+class ClaudeBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(self.root))
+        self.b = load_bridge(self.root)
+        self.router_calls = []
+        self.router_result = 'ROUTED demo-1a'
+        self.b.run_router = lambda prompt: (self.router_calls.append(prompt) or (self.router_result, 0.001))
+        self.b.log = lambda text: None
+
+    # -- helpers
+    def drop(self, **fields):
+        msg = {'id': 'codex-1', 'reply_to': None, 'from': 'codex', 'to': 'claude',
+               'project': 'demo', 'type': 'request', 'body': 'do it'}
+        msg.update(fields)
+        (self.root / 'to-claude' / (msg['id'] + '.json')).write_text(json.dumps(msg))
+        return msg
+
+    def outbox(self):
+        return [json.loads(p.read_text()) for p in sorted((self.root / 'to-codex').glob('*.json'))]
+
+    def send_args(self, **kw):
+        base = dict(type='request', project='codex-proj', reply_to=None, origin='demo-1a',
+                    body='hi', body_file=None, purpose='user-requested')
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def set_policy(self, default, projects=None):
+        (self.root / 'claude-policy.json').write_text(json.dumps(
+            {'default': {'self_initiated': default},
+             'projects': {k: {'self_initiated': v} for k, v in (projects or {}).items()}}))
+
+    # -- claim / at-most-once
+    def test_claim_archives_and_suppresses_duplicates(self):
+        self.drop()
+        msg, dup = self.b.claim('codex-1.json')
+        self.assertFalse(dup)
+        self.assertEqual(msg['body'], 'do it')
+        self.assertTrue((self.root / 'archive' / 'codex-1.json').exists())
+        self.drop()  # same id delivered again
+        _, dup = self.b.claim('codex-1.json')
+        self.assertTrue(dup)
+
+    # -- inbound requests
+    def test_request_routed_records_pending_and_sends_reply_instructions(self):
+        self.b.handle_request(self.drop())
+        self.assertEqual(self.b.load_pending()['codex-1']['session'], 'demo-1a')
+        self.assertIn('"demo"', self.router_calls[0])
+        self.assertIn('bridge.py reply codex-1', self.router_calls[0])
+        self.assertEqual(self.outbox(), [])
+
+    def test_request_without_session_gets_error_response(self):
+        self.router_result = 'NO_SESSION'
+        self.b.handle_request(self.drop())
+        (resp,) = self.outbox()
+        self.assertEqual((resp['type'], resp['reply_to']), ('response', 'codex-1'))
+        self.assertTrue(resp['body'].startswith('ERROR: no running Claude session for demo'))
+        self.assertEqual(self.b.load_pending(), {})
+
+    def test_router_failure_gets_error_response(self):
+        self.router_result = 'FAILED router timed out'
+        self.b.handle_request(self.drop())
+        self.assertIn('could not deliver', self.outbox()[0]['body'])
+
+    def test_reply_sends_response_once(self):
+        self.b.handle_request(self.drop())
+        self.b.cmd_reply(argparse.Namespace(id='codex-1', body='done', body_file=None))
+        (resp,) = self.outbox()
+        self.assertEqual((resp['reply_to'], resp['body'], resp['project']), ('codex-1', 'done', 'demo'))
+        with self.assertRaises(SystemExit):
+            self.b.cmd_reply(argparse.Namespace(id='codex-1', body='again', body_file=None))
+        self.assertEqual(len(self.outbox()), 1)
+
+    # -- outbound requests and Codex responses
+    def test_codex_response_delivered_to_origin_session(self):
+        self.b.cmd_send(self.send_args())
+        (req,) = self.outbox()
+        self.b.handle_response(self.drop(id='codex-2', type='response', reply_to=req['id'], body='answer'))
+        self.assertIn('"demo-1a"', self.router_calls[0])
+        self.assertIn('[codex-reply %s] answer' % req['id'], self.router_calls[0])
+        self.assertEqual(self.b.load_pending(), {})
+
+    def test_response_to_unknown_request_is_not_delivered(self):
+        self.b.handle_response(self.drop(id='codex-3', type='response', reply_to='nope'))
+        self.assertEqual(self.router_calls, [])
+
+    # -- policy
+    def test_project_of_session(self):
+        self.assertEqual(self.b.project_of_session('300-baud-web-e8'), '300-baud-web')
+        self.assertEqual(self.b.project_of_session('pyroto-7c'), 'pyroto')
+
+    def test_self_initiated_send_follows_project_policy(self):
+        self.set_policy(['code-review'], {'locked': []})
+        self.b.cmd_send(self.send_args(purpose='code-review'))
+        self.assertEqual(self.outbox()[0]['purpose'], 'code-review')
+        for kw in (dict(purpose='pr-fix'),                         # purpose not allowed
+                   dict(purpose='code-review', origin='locked-2b'),  # project allows nothing
+                   dict(purpose='code-review', origin=None)):      # no origin to check
+            with self.assertRaises(SystemExit):
+                self.b.cmd_send(self.send_args(**kw))
+        self.b.cmd_send(self.send_args(origin='locked-2b'))  # user-requested is always allowed
+        self.assertEqual(len(self.outbox()), 2)
+
+    def test_inbound_self_initiated_request_checked_against_policy(self):
+        self.set_policy([], {'demo': ['design-feedback']})
+        self.b.handle_request(self.drop(purpose='code-review'))
+        self.assertIn("does not accept self-initiated 'code-review'", self.outbox()[0]['body'])
+        self.assertEqual(self.router_calls, [])
+        self.b.handle_request(self.drop(id='codex-4', purpose='design-feedback'))
+        self.assertEqual(len(self.router_calls), 1)
+
+    def test_policy_changes_need_a_terminal(self):
+        with self.assertRaises(SystemExit):
+            self.b.cmd_policy(argparse.Namespace(action='allow', project='demo', purposes=['pr-fix']))
+        self.assertFalse((self.root / 'claude-policy.json').exists())
+
+    # -- timeouts
+    def test_sweep_expires_old_inbound_and_outbound_records(self):
+        old = time.time() - 3 * 24 * 3600
+        self.b.save_pending({
+            'codex-old': {'direction': 'inbound', 'project': 'demo', 'session': 'demo-1a', 'created_ts': old},
+            'codex-new': {'direction': 'inbound', 'project': 'demo', 'session': 'demo-1a', 'created_ts': time.time()},
+            'claude-old': {'direction': 'outbound', 'origin_session': 'demo-1a', 'created_ts': old},
+        })
+        self.b.sweep_timeouts(7200)
+        self.assertEqual(list(self.b.load_pending()), ['codex-new'])
+        (resp,) = self.outbox()
+        self.assertEqual(resp['reply_to'], 'codex-old')
+        self.assertTrue(resp['body'].startswith('ERROR: demo-1a did not answer'))
+
+
+if __name__ == '__main__':
+    unittest.main()
