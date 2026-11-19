@@ -63,8 +63,9 @@ information and never become new tasks or trigger another bridge reply.
 - SQLite retains processed IDs across restarts. An ambiguous claimed request is
   never automatically sent again; inspect destination history before retrying.
 - Final answers are matched to the exact request marker, never just the latest
-  answer in a chat. Busy chats remain pending. Unresolved messages expire after
-  one hour with an error; this does not cancel work already running in a chat.
+  answer in a chat. Busy chats remain pending. Pending, unclaimed requests expire
+  after one hour with an error. Claimed work and informational responses do not
+  expire.
 - Unknown projects receive an error. Invalid files are archived and logged.
 - The scheduled agent must successfully update its next interval for backoff to
   take effect. Failures must be reported rather than silently ignored.
@@ -83,5 +84,6 @@ python3 -m unittest discover -s tests -v
 ```
 
 See [DISPATCHER.md](DISPATCHER.md) for the Codex routing procedure and
-[CLAUDE.md](CLAUDE.md) for Claude's separately maintained dispatcher instructions.
-Claude's referenced `bridge.py` tool is not included here.
+`claude/README.md` for Claude installation when that implementation is present
+(introduced by PR #4). Earlier checkouts need a separately installed compatible
+Claude dispatcher; see SETUP.md.

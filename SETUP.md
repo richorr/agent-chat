@@ -81,8 +81,12 @@ ID and notification preferences. Do not leave a second dispatcher active. Once
 verified, archive old dispatcher run chats; do not archive registered destinations.
 Route registration alone does not alter the automation's target or scheduling mode.
 
-Configure Claude independently using [CLAUDE.md](CLAUDE.md) and the protocol. Its
-referenced `~/.agent-bridge/bin/bridge.py` is **not bundled**. Ask the Claude
+Configure Claude using `claude/README.md` and the protocol when the Claude
+implementation is present in your checkout (introduced by PR #4). That guide
+installs `claude/bridge.py` as `~/.agent-bridge/bin/bridge.py` and configures the
+router under `~/.agent-bridge/router`. Earlier checkouts require a separately
+installed compatible Claude dispatcher; root `CLAUDE.md` is not its install guide.
+Ask the Claude
 coordinator to verify a live session named `<project>-<two hex characters>`;
 a Codex route does not prove Claude availability. Do not use Claude's sender from Codex.
 
@@ -109,7 +113,7 @@ resend because of delay. Normal destination approvals still apply.
 | No immediate delivery | Check scheduler availability and the current 5–30 minute interval. Busy destinations remain pending. |
 | Unknown project or no Claude session | Check the exact receiving project name, local Codex route, and live Claude coordinator discovery. |
 | Claimed message has no clear result | Inspect the destination for its exact `[agent-bridge ID]` marker. Never blindly resend a claimed action. Follow DISPATCHER.md to resolve an ambiguous delivery. |
-| Timeout | Codex expires unresolved actions after one hour. This does not cancel destination work; inspect it before submitting again. |
+| Timeout | Codex expires only pending, unclaimed requests after one hour. Claimed work and informational responses do not expire. Inspect destination state before submitting again. |
 
 `scan` is a mutation: it ingests messages, flushes replies, expires work, and updates
 backoff. Do not run ad hoc scans alongside the dispatcher. For isolated experiments,

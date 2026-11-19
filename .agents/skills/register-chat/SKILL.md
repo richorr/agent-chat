@@ -31,13 +31,15 @@ name. Use an explicitly supplied project name when provided.
 Claude's current dispatcher does not use a persistent chat registry. It discovers
 live peer sessions through its coordinator's `ListAgents` capability.
 
-1. Use the coordinator/session tools to identify this session's actual name and
-   verify that it appears among the live peers. Names must be `<project>-<two hex
-   characters>`; remove only that final suffix when checking the project.
+1. Call `ListAgents` and read this session's actual name from its identity header
+   (`This session is <name>`). The peer list excludes the calling session; absence
+   from that list is expected. Names must be `<project>-<two hex characters>`;
+   remove only that final suffix when checking the project.
 2. If this session matches, report it as discoverable, with no route-file write.
-   If multiple sessions match, explain that the current dispatcher prefers idle
-   sessions, then the most recently started; this does not pin this particular chat.
-   If this session is absent, misnamed, or the coordinator tools are unavailable,
+   Use the peer list only to identify other sessions for the same project. If any
+   match, explain that the dispatcher prefers idle sessions, then the most recently
+   started; this does not pin this particular chat.
+   If the identity header is missing, this session is misnamed, or the tools are unavailable,
    report that registration is not established and what is missing. Do not invent
    a Claude registry or modify Claude's dispatcher to work around it.
 3. Never put a Claude session name in `codex-routes.json`. If the user instead asks
