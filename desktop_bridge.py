@@ -44,7 +44,7 @@ class DesktopBridge(Bridge):
                 if not thread:
                     self.finish(row, 'ERROR: no configured route or matching unanswered request')
                     continue
-            if time.time() - row['started'] > self.timeout:
+            if row['status'] == 'pending' and msg['type'] == 'request' and time.time() - row['started'] > self.timeout:
                 self.finish(row, 'ERROR: delivery timed out; inspect destination before retrying')
                 continue
             actions.append({'id': row['id'], 'status': row['status'], 'threadId': thread,
@@ -53,7 +53,8 @@ class DesktopBridge(Bridge):
         old = self.db.execute('SELECT interval FROM polling WHERE id=1').fetchone()[0]
         # A processed/errored message is activity too, not only outstanding work.
         after = self.db.execute('SELECT COUNT(*) FROM incoming').fetchone()[0]
-        interval = 5 if actions or after > before else min(max(old, 5) * 2, 30)
+        unanswered = self.db.execute('SELECT 1 FROM outgoing WHERE response_id IS NULL LIMIT 1').fetchone()
+        interval = 5 if actions or after > before or unanswered else min(max(old, 5) * 2, 30)
         self.save('UPDATE polling SET interval=? WHERE id=1', (interval,))
         return {'actions': actions, 'next_poll_minutes': interval}
 
