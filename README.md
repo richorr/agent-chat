@@ -21,9 +21,11 @@ The dispatcher starts at five minutes, doubles its interval on empty checks
 requests keep the interval at five minutes. At the idle cap there are approximately
 48 model checks per day. This is low-cost polling, not free or immediate delivery.
 The app and local automation scheduler must be available; sleep or scheduler delays
-can delay delivery. Each destination uses its own model and permissions. Standalone scheduled runs
-start fresh; routes and delivery state live on disk, so dispatcher history does not
-grow between checks and routine compaction is unnecessary.
+can delay delivery. Each destination uses its own model and permissions.
+
+Use one persistent dispatcher chat with a heartbeat automation. Routes and
+delivery state live on disk; chat history is not delivery state. Heartbeat checks
+reuse the dispatcher chat instead of creating a new sidebar chat per check.
 
 ## Setup
 
@@ -31,28 +33,12 @@ Requires Python 3.9+ (standard library only), Codex Desktop with local automatio
 and cross-chat tools, and a separately configured Claude dispatcher implementing
 [PROTOCOL.md](PROTOCOL.md). No external Python packages are required.
 
-1. Clone this repository and add its folder as a Codex project. Create or choose the
-   destination chats. Create `~/.agent-bridge/state/codex-routes.json` mapping exact
-   project names to their Codex chat IDs:
-
-   ```json
-   { "example-project": "your-destination-chat-id" }
-   ```
-
-2. Ask Codex to create a **standalone local automation** in this project, initially
-   every five minutes, with an available affordable model and low reasoning. Its
-   prompt should say: "Run the Codex mailbox dispatcher according to DISPATCHER.md
-   in this project. The user authorizes forwarding requests and replies only for
-   configured routes. Do no project work yourself. Stop if that file is missing."
-   The dispatcher currently expects automation ID `agent-bridge-dispatcher`; if
-   yours differs, update the ID in DISPATCHER.md. Configure notifications for failed
-   runs only. Verify a run can read and write your mailbox and reschedule itself.
-3. Configure Claude's side using the same mailbox and protocol. Test one harmless
-   request and verify its matching response before routing real work.
-
-Keep all private routes, messages, logs and state in `~/.agent-bridge/`, outside
-this repository. Grant the dispatcher mailbox access through normal Codex permissions.
-Do not run two dispatchers against the same mailbox.
+Follow [SETUP.md](SETUP.md) for clone and verification commands, destination
+registration, a reusable dispatcher prompt, permissions, and troubleshooting.
+Use one heartbeat attached to your dispatcher chat, an available low-cost model,
+and notifications for failed runs only. Keep private mailbox data outside Git.
+The Claude dispatcher must be installed separately; this repository does not
+provide a complete two-sided installer.
 
 ## Commands
 
