@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -137,6 +139,47 @@ class ClaudeBridgeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.b.cmd_policy(argparse.Namespace(action='allow', project='demo', purposes=['pr-fix']))
         self.assertFalse((self.root / 'claude-policy.json').exists())
+
+    # -- races (PR #4 review)
+    def test_session_can_answer_while_router_is_still_running(self):
+        def router(prompt):  # SendMessage has delivered; the session answers before the router exits
+            self.b.cmd_reply(argparse.Namespace(id='codex-1', body='fast', body_file=None))
+            return 'ROUTED demo-1a', 0.001
+        self.b.run_router = router
+        self.b.handle_request(self.drop())
+        (resp,) = self.outbox()
+        self.assertEqual((resp['reply_to'], resp['body']), ('codex-1', 'fast'))
+        self.assertEqual(self.b.load_pending(), {})  # answered record is not recreated
+
+    def test_no_error_when_answered_although_router_reports_failure(self):
+        def router(prompt):
+            self.b.cmd_reply(argparse.Namespace(id='codex-1', body='fast', body_file=None))
+            return 'FAILED lost track after SendMessage', 0.001
+        self.b.run_router = router
+        self.b.handle_request(self.drop())
+        self.assertEqual([m['body'] for m in self.outbox()], ['fast'])
+
+    def test_outbound_record_exists_before_request_is_visible_to_codex(self):
+        seen = []
+        real = self.b.write_message
+        def spy(*a, **kw):
+            seen.append(kw.get('msg_id') in self.b.load_pending())
+            return real(*a, **kw)
+        self.b.write_message = spy
+        self.b.cmd_send(self.send_args())
+        self.assertEqual(seen, [True])
+
+    def test_concurrent_writers_do_not_lose_pending_records(self):
+        env = dict(os.environ, AGENT_BRIDGE_ROOT=str(self.root))
+        script = ('import subprocess, sys\n'
+                  'for i in range(15):\n'
+                  '    subprocess.check_call([sys.executable, %r, "send", "--type", "request", "--project", "p",'
+                  ' "--origin", "demo-1a", "--body", "x"], stdout=subprocess.DEVNULL)\n') % str(SCRIPT)
+        procs = [subprocess.Popen([sys.executable, '-c', script], env=env) for _ in range(6)]
+        for p in procs:
+            self.assertEqual(p.wait(), 0)
+        self.assertEqual(len(self.b.load_pending()), 90)
+        self.assertEqual(len(self.outbox()), 90)
 
     # -- timeouts
     def test_sweep_expires_old_inbound_and_outbound_records(self):

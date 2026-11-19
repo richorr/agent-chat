@@ -19,7 +19,9 @@ Commands:
   pending  list/get/done routing records
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -37,6 +39,7 @@ TMP = os.path.join(ROOT, "tmp")
 STATE = os.path.join(ROOT, "state")
 PROCESSED = os.path.join(STATE, "claude-processed.txt")
 PENDING = os.path.join(STATE, "claude-pending.json")
+PENDING_LOCK = os.path.join(STATE, "claude-pending.lock")
 
 POLICY = os.path.join(ROOT, "claude-policy.json")  # human-owned config, edited with `policy` in a terminal
 USER_REQUESTED = "user-requested"
@@ -130,6 +133,23 @@ def save_pending(data):
     atomic_write_json(PENDING, data)
 
 
+@contextlib.contextmanager
+def pending_txn():
+    """Read-modify-write the pending records under an exclusive lock shared by every bridge process
+    (serve, send, reply, pending), so concurrent writers cannot overwrite each other's changes.
+    Yields the records; saves them on exit if they changed. Never hold it across a router run."""
+    with open(PENDING_LOCK, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            pending = load_pending()
+            before = json.dumps(pending, sort_keys=True)
+            yield pending
+            if json.dumps(pending, sort_keys=True) != before:
+                save_pending(pending)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def inbox_files():
     try:
         names = os.listdir(TO_CLAUDE)
@@ -182,8 +202,12 @@ def project_of_session(name):
     return m.group(1) if m else name
 
 
-def write_message(msg_type, project, body, reply_to=None, purpose=None):
-    msg_id = "claude-%s-%s" % (datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+def new_message_id():
+    return "claude-%s-%s" % (datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
+
+
+def write_message(msg_type, project, body, reply_to=None, purpose=None, msg_id=None):
+    msg_id = msg_id or new_message_id()
     msg = {"id": msg_id, "reply_to": reply_to, "from": "claude", "to": "codex",
            "project": project, "type": msg_type, "body": body, "created_at": now_iso()}
     if purpose:
@@ -225,54 +249,61 @@ def handle_request(msg):
         write_message("response", project, "ERROR: " + reason, reply_to=msg["id"])
         log("request %s rejected by policy: %s" % (msg["id"], reason))
         return
+    # Record the request *before* delivery: the session can answer (cmd_reply) while the router
+    # run is still finishing, and that answer needs an open record to go through.
+    with pending_txn() as pending:
+        pending[msg["id"]] = {"direction": "inbound", "project": project, "session": None,
+                              "created_at": now_iso(), "created_ts": time.time()}
     text = REQUEST_TEMPLATE.format(id=msg["id"], project=project, body=msg.get("body", ""))
     result, cost = run_router(ROUTE_PROMPT.format(project=project, message=text))
     m = re.match(r"ROUTED\s+(\S+)", result)
     if m:
-        pending = load_pending()
-        pending[msg["id"]] = {"direction": "inbound", "project": project, "session": m.group(1),
-                              "created_at": now_iso(), "created_ts": time.time()}
-        save_pending(pending)
-        log("request %s -> %s%s" % (msg["id"], m.group(1), fmt_cost(cost)))
+        with pending_txn() as pending:
+            rec = pending.get(msg["id"])
+            if rec is not None:  # if it is gone, the session already answered: don't recreate it
+                rec["session"] = m.group(1)
+        log("request %s -> %s%s%s" % (msg["id"], m.group(1), fmt_cost(cost),
+                                      "" if rec is not None else " (already answered)"))
     else:
         reason = ("no running Claude session for %s" % project) if result.startswith("NO_SESSION") \
             else "could not deliver: %s" % result
-        write_message("response", project, "ERROR: " + reason, reply_to=msg["id"])
-        log("request %s rejected: %s%s" % (msg["id"], reason, fmt_cost(cost)))
+        with pending_txn() as pending:
+            rec = pending.pop(msg["id"], None)
+            if rec is not None:  # a session that got it anyway and answered wins over the error
+                write_message("response", project, "ERROR: " + reason, reply_to=msg["id"])
+        log("request %s rejected: %s%s%s" % (msg["id"], reason, fmt_cost(cost),
+                                             "" if rec is not None else " (but already answered; no error sent)"))
 
 
 def handle_response(msg):
-    pending = load_pending()
-    rec = pending.pop(msg.get("reply_to"), None)
+    with pending_txn() as pending:
+        rec = pending.get(msg.get("reply_to"))
+        if rec is not None and rec.get("origin_session"):
+            pending.pop(msg["reply_to"])
     if rec is None or not rec.get("origin_session"):
         log("response %s answers unknown request %s; archived, not delivered" % (msg["id"], msg.get("reply_to")))
         return
-    save_pending(pending)
     text = "[codex-reply %s] %s" % (msg["reply_to"], msg.get("body", ""))
     result, cost = run_router(DELIVER_PROMPT.format(to=rec["origin_session"], message=text))
     log("response %s -> %s: %s%s" % (msg["id"], rec["origin_session"], result, fmt_cost(cost)))
 
 
 def sweep_timeouts(limit):
-    pending = load_pending()
     now = time.time()
-    changed = False
-    for k in list(pending):
-        r = pending[k]
-        age = now - float(r.get("created_ts", now))
-        if r.get("direction") == "inbound" and limit > 0 and age > limit:
-            pending.pop(k)
-            write_message("response", r.get("project"),
-                          "ERROR: %s did not answer within %d minutes" % (r.get("session"), limit // 60), reply_to=k)
-            log("request %s timed out waiting for %s" % (k, r.get("session")))
-            changed = True
-        elif r.get("direction") == "outbound" and age > OUTBOUND_TTL:
-            pending.pop(k)
-            log("outbound request %s from %s got no answer from Codex within %d hours; forgotten"
-                % (k, r.get("origin_session"), OUTBOUND_TTL // 3600))
-            changed = True
-    if changed:
-        save_pending(pending)
+    with pending_txn() as pending:
+        for k in list(pending):
+            r = pending[k]
+            age = now - float(r.get("created_ts", now))
+            if r.get("direction") == "inbound" and limit > 0 and age > limit:
+                pending.pop(k)
+                who = r.get("session") or "the Claude session"
+                write_message("response", r.get("project"),
+                              "ERROR: %s did not answer within %d minutes" % (who, limit // 60), reply_to=k)
+                log("request %s timed out waiting for %s" % (k, who))
+            elif r.get("direction") == "outbound" and age > OUTBOUND_TTL:
+                pending.pop(k)
+                log("outbound request %s from %s got no answer from Codex within %d hours; forgotten"
+                    % (k, r.get("origin_session"), OUTBOUND_TTL // 3600))
 
 
 class InboxWaiter(object):
@@ -356,13 +387,13 @@ def cmd_serve(args):
 # ---------------------------------------------------------------- other commands
 
 def cmd_reply(args):
-    pending = load_pending()
-    rec = pending.get(args.id)
-    if rec is None or rec.get("direction") != "inbound":
-        sys.exit("no open bridge request %s (already answered, timed out, or wrong id)" % args.id)
-    rid = write_message("response", rec.get("project"), read_body(args), reply_to=args.id)
-    pending.pop(args.id, None)
-    save_pending(pending)
+    body = read_body(args)
+    with pending_txn() as pending:  # check, send and close under one lock: exactly one answer per request
+        rec = pending.get(args.id)
+        if rec is None or rec.get("direction") != "inbound":
+            sys.exit("no open bridge request %s (already answered, timed out, or wrong id)" % args.id)
+        rid = write_message("response", rec.get("project"), body, reply_to=args.id)
+        pending.pop(args.id)
     print("Sent to Codex as %s." % rid)
 
 
@@ -379,13 +410,15 @@ def cmd_send(args):
             sys.exit("not allowed: project %s may not send self-initiated '%s' requests (allowed: %s). "
                      "Ask the user first, then send with --purpose user-requested."
                      % (own, purpose, ", ".join(allowed) or "none"))
-    msg_id = write_message(args.type, args.project, read_body(args), reply_to=args.reply_to,
-                           purpose=purpose if args.type == "request" else None)
+    body = read_body(args)
+    msg_id = new_message_id()
     if args.type == "request" and args.origin:
-        pending = load_pending()
-        pending[msg_id] = {"direction": "outbound", "origin_session": args.origin,
-                           "project": args.project, "created_at": now_iso(), "created_ts": time.time()}
-        save_pending(pending)
+        # Record first, so a fast answer from Codex always finds the record.
+        with pending_txn() as pending:
+            pending[msg_id] = {"direction": "outbound", "origin_session": args.origin,
+                               "project": args.project, "created_at": now_iso(), "created_ts": time.time()}
+    write_message(args.type, args.project, body, reply_to=args.reply_to,
+                  purpose=purpose if args.type == "request" else None, msg_id=msg_id)
     print(msg_id)
 
 
@@ -444,8 +477,8 @@ def cmd_pending(args):
             sys.exit("no pending record for %s" % args.id)
         print(json.dumps(pending[args.id]))
     elif args.action == "done":
-        pending.pop(args.id, None)
-        save_pending(pending)
+        with pending_txn() as locked:
+            locked.pop(args.id, None)
         print("ok")
 
 
