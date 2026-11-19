@@ -77,8 +77,9 @@ information and never become new tasks or trigger another bridge reply.
 - SQLite retains processed IDs across restarts. An ambiguous claimed request is
   never automatically sent again; inspect destination history before retrying.
 - Final answers are matched to the exact request marker, never just the latest
-  answer in a chat. Busy chats remain pending. Unresolved messages expire after
-  one hour with an error; this does not cancel work already running in a chat.
+  answer in a chat. Busy chats remain pending. Pending, unclaimed requests expire
+  after one hour with an error. Claimed work and informational responses do not
+  expire.
 - Unknown projects receive an error. Invalid files are archived and logged.
 - The scheduled agent must successfully update its next interval for backoff to
   take effect. Failures must be reported rather than silently ignored.

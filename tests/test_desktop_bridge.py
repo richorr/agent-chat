@@ -49,6 +49,18 @@ class MailboxTests(unittest.TestCase):
     def test_backoff_and_reset(self):
         self.assertEqual([self.b.scan()['next_poll_minutes'] for _ in range(6)], [10, 20, 30, 30, 30, 30])
         self.incoming(); self.assertEqual(self.b.scan()['next_poll_minutes'], 5)
+    def test_unanswered_outgoing_keeps_polling_after_restart(self):
+        self.assertEqual([self.b.scan()['next_poll_minutes'] for _ in range(3)], [10, 20, 30])
+        ident = self.b.send('demo', 'question', 'origin-chat')
+        self.assertEqual([self.b.scan()['next_poll_minutes'] for _ in range(3)], [5, 5, 5])
+        self.b.db.close()
+        self.b = DesktopBridge(self.home, {'demo': 'chat-123'})
+        self.assertEqual(self.b.scan()['next_poll_minutes'], 5)
+        self.incoming(type='response', reply_to=ident)
+        self.assertEqual(self.b.scan()['next_poll_minutes'], 5)
+        self.b.claim('claude-one')
+        self.b.complete('claude-one', 'Delivered')
+        self.assertEqual([self.b.scan()['next_poll_minutes'] for _ in range(3)], [10, 20, 30])
     def test_unknown_route_gets_error(self):
         self.incoming(project='unknown'); self.assertEqual(self.b.scan()['actions'], [])
         reply = json.loads(next((self.home / 'to-claude').glob('*.json')).read_text())
@@ -63,11 +75,33 @@ class MailboxTests(unittest.TestCase):
         (self.home / 'to-codex/bad.json').write_text('{')
         self.assertEqual(self.b.scan()['actions'], [])
         self.assertEqual(len(list((self.home / 'archive').glob('*.json'))), 1)
-    def test_claim_timeout_reports_error(self):
-        self.incoming(); self.b.scan(); self.b.claim('claude-one')
+    def test_pending_request_timeout_reports_error(self):
+        self.incoming(); self.b.scan()
         self.b.save('UPDATE incoming SET started=0', ())
         self.assertEqual(self.b.scan()['actions'], [])
         reply = json.loads(next((self.home / 'to-claude').glob('*.json')).read_text())
         self.assertTrue(reply['body'].startswith('ERROR:'))
+
+    def test_aged_claimed_request_can_complete(self):
+        self.incoming(); self.b.scan(); self.b.claim('claude-one')
+        self.b.save('UPDATE incoming SET started=0', ())
+        self.assertEqual(self.b.scan()['actions'][0]['status'], 'desktop-claimed')
+        self.b.complete('claude-one', 'eventual answer')
+        reply = json.loads(next((self.home / 'to-claude').glob('*.json')).read_text())
+        self.assertEqual(reply['body'], 'eventual answer')
+        self.assertEqual(reply['reply_to'], 'claude-one')
+
+    def test_aged_pending_response_can_be_delivered(self):
+        ident = self.b.send('demo', 'question', 'origin-chat')
+        self.incoming(type='response', reply_to=ident, body='eventual answer')
+        self.b.scan()
+        self.b.save('UPDATE incoming SET started=0', ())
+        self.assertEqual(self.b.scan()['actions'][0]['status'], 'pending')
+        claim = self.b.claim('claude-one')
+        self.assertEqual(claim['threadId'], 'origin-chat')
+        self.assertIn('eventual answer', claim['prompt'])
+        self.b.complete('claude-one', 'Delivered')
+        self.assertEqual(self.b.scan()['actions'], [])
+        self.assertEqual(len(list((self.home / 'to-claude').glob('*.json'))), 1)
 
 if __name__ == '__main__': unittest.main()
