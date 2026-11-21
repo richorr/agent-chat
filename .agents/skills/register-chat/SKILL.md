@@ -7,8 +7,11 @@ description: Register the current Codex chat or verify the current Claude sessio
 
 Use the existing dispatcher; do not start another dispatcher, change its schedule,
 send test messages, or alter permission policy as part of registration.
-The project is the exact receiving project name, normally the repository folder
-name. Use an explicitly supplied project name when provided.
+In Codex, the project is the incoming route name. Use the name supplied with
+`/register-chat NAME`, or the repository folder name when no name is supplied.
+This opts the current chat into incoming dispatch for that name. A sending chat
+can discover it with `/chat-with`. In Claude, the project is the coordinator
+project name discovered below.
 
 ## Codex
 
