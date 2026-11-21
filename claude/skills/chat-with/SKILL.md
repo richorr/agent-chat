@@ -25,7 +25,9 @@ are stored in `~/.agent-bridge/state/`, outside Git.
    - **A chat name plus text**: write the text, exactly as given, to a temporary file and run
      `B connect <chat> --session <name> --body-file <file>`. This saves the instructions or replaces
      earlier ones. Report `SAVED` or `REPLACED`, and that nothing was sent. If the name is unknown,
-     show the names that exist.
+     show the names that exist. If it reports `STALE`, Codex has moved the name to another chat and
+     nothing was saved. Tell the user, and only if they confirm the new destination, rerun with
+     `--reconnect` added (keeping `--body-file`).
    - **`remove <chat>`**: run `B disconnect <chat> --session <name>`.
 3. Saving a connection sends nothing. It does not register this session or change incoming dispatch.
 

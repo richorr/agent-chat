@@ -243,12 +243,24 @@ def resolve_chat(target):
                   "that should receive it" % (target, target))
 
 
+def owner(entry):
+    """How a registration's owner is shown: 'name [ref]', or just 'name' for an old entry without a ref."""
+    return "%s [%s]" % (entry["session"], entry["ref"]) if entry.get("ref") else entry["session"]
+
+
+def same_owner(entry, session, ref):
+    """A recorded ref pins the registration to that exact session: a later session that reuses the
+    name (different or missing ref) is a different owner. An entry without a ref matches by name."""
+    return entry["session"] == session and (not entry.get("ref") or entry["ref"] == ref)
+
+
 def route_prompt(entry, message):
     session, ref = entry["session"], entry.get("ref")
     ref_rule, to = "", '"%s"' % session
-    if ref:
-        ref_rule = ' If several rows have that name, use only the one whose [ref] is "%s".' % ref
-        to = '"%s" (or "%s [%s]" if several rows have that name)' % (session, session, ref)
+    if ref:  # pinned: the row must match name AND ref, even when it is the only row with that name
+        ref_rule = (' Its [ref] must also be exactly "%s". A row with that name but any other [ref] is a '
+                    'different session: treat it as not listed.' % ref)
+        to = '"%s [%s]"' % (session, ref)
     return ROUTE_PROMPT.format(session=session, ref_rule=ref_rule, to=to, message=message)
 
 
@@ -319,9 +331,9 @@ def handle_request(msg):
     else:
         if result.startswith("OFFLINE"):
             reason = ("Claude chat '%s' is registered to session %s, which is offline. The request was not "
-                      "sent to any other session" % (chat, entry["session"]))
+                      "sent to any other session" % (chat, owner(entry)))
         else:
-            reason = "could not deliver to Claude chat '%s' (session %s): %s" % (chat, entry["session"], result)
+            reason = "could not deliver to Claude chat '%s' (session %s): %s" % (chat, owner(entry), result)
         with pending_txn() as pending:
             rec = pending.pop(msg["id"], None)
             if rec is not None:  # a session that got it anyway and answered wins over the error
@@ -536,20 +548,20 @@ def cmd_register(args):
         sys.exit("--session <this session's name> is required (first line of ListAgents)")
     with json_txn(CHATS) as chats:
         cur = chats.get(args.chat)
-        if cur and cur["session"] != args.session and args.replace != cur["session"]:
+        mine = cur is not None and same_owner(cur, args.session, args.ref)
+        if cur and not mine and args.replace != owner(cur):
             sys.exit("CLAIMED: '%s' is registered to session %s (since %s). Nothing changed. To move it here, "
-                     "confirm with the user, then rerun with --replace %s"
-                     % (args.chat, cur["session"], cur.get("registered_at", "?"), cur["session"]))
-        chats[args.chat] = {"session": args.session, "ref": args.ref or None,
-                            "project": project_of_session(args.session),
-                            "registered_at": cur["registered_at"] if cur and cur["session"] == args.session
-                            else now_iso()}
-    if cur and cur["session"] != args.session:
-        print("MOVED: '%s' now delivers to %s (was %s)." % (args.chat, args.session, cur["session"]))
+                     "confirm with the user, then rerun with --replace '%s'"
+                     % (args.chat, owner(cur), cur.get("registered_at", "?"), owner(cur)))
+        new = {"session": args.session, "ref": args.ref or None, "project": project_of_session(args.session),
+               "registered_at": cur["registered_at"] if mine else now_iso()}
+        chats[args.chat] = new
+    if cur and not mine:
+        print("MOVED: '%s' now delivers to %s (was %s)." % (args.chat, owner(new), owner(cur)))
     elif cur:
-        print("UNCHANGED: '%s' already delivers to %s." % (args.chat, args.session))
+        print("UNCHANGED: '%s' already delivers to %s." % (args.chat, owner(new)))
     else:
-        print("REGISTERED: '%s' now delivers to %s." % (args.chat, args.session))
+        print("REGISTERED: '%s' now delivers to %s." % (args.chat, owner(new)))
     others = sorted(n for n, e in load_json(CHATS).items() if e["session"] == args.session and n != args.chat)
     if others:
         print("This session also receives: %s" % ", ".join(others))
@@ -560,8 +572,9 @@ def cmd_unregister(args):
         cur = chats.get(args.chat)
         if cur is None:
             sys.exit("'%s' is not registered" % args.chat)
-        if cur["session"] != args.session:
-            sys.exit("'%s' belongs to session %s, not %s; nothing changed" % (args.chat, cur["session"], args.session))
+        if not same_owner(cur, args.session, args.ref):
+            me = owner({"session": args.session, "ref": args.ref})
+            sys.exit("'%s' belongs to session %s, not %s; nothing changed" % (args.chat, owner(cur), me))
         chats.pop(args.chat)
     print("UNREGISTERED: '%s'. Codex requests for it now get an ERROR." % args.chat)
 
@@ -615,7 +628,8 @@ def cmd_connect(args):
     routes = load_json(CODEX_ROUTES)
     if args.name not in routes:
         sys.exit("unknown Codex chat '%s'. Known: %s" % (args.name, ", ".join(sorted(routes)) or "none"))
-    text = None if args.reconnect else read_body(args).strip()
+    given = args.body is not None or args.body_file
+    text = read_body(args).strip() if (given or not args.reconnect) else None
     if text == "":
         sys.exit("no instructions given")
     with json_txn(CONNECTIONS) as conns:
@@ -624,7 +638,12 @@ def cmd_connect(args):
         if args.reconnect:
             if old is None:
                 sys.exit("no saved connection to '%s' to reconnect" % args.name)
-            text = old["instructions"]
+            text = text or old["instructions"]
+        elif old is not None and old.get("destination") != routes[args.name]:
+            # Never let new text quietly re-point a connection at a different Codex chat.
+            sys.exit("STALE: Codex moved '%s' to another chat since this connection was saved. Nothing changed. "
+                     "Ask the user to confirm the new destination, then rerun with --reconnect "
+                     "(add the new text to replace the instructions at the same time)." % args.name)
         mine[args.name] = {"instructions": text, "destination": routes[args.name], "saved_at": now_iso()}
     print("%s: connection %s for %s. Nothing was sent." % (
         "RECONNECTED" if args.reconnect else ("REPLACED" if old else "SAVED"), args.name, args.session))
@@ -703,11 +722,13 @@ def main():
     rg.add_argument("chat")
     rg.add_argument("--session", required=True, help="this session's name, from the first line of ListAgents")
     rg.add_argument("--ref", help="this session's [ref] from ListAgents, to tell apart sessions with the same name")
-    rg.add_argument("--replace", metavar="OLD_SESSION", help="move the name from OLD_SESSION (only after the user agrees)")
+    rg.add_argument("--replace", metavar="OLD_OWNER",
+                    help="move the name from OLD_OWNER, exactly as CLAIMED printed it (only after the user agrees)")
 
     ur = sub.add_parser("unregister")
     ur.add_argument("chat")
     ur.add_argument("--session", required=True)
+    ur.add_argument("--ref", help="this session's [ref] from ListAgents")
 
     ch = sub.add_parser("chats", help="list registered Claude chats")
     ch.add_argument("--json", action="store_true")
@@ -720,7 +741,8 @@ def main():
     co.add_argument("--session", required=True)
     co.add_argument("--body", help="the instructions")
     co.add_argument("--body-file")
-    co.add_argument("--reconnect", action="store_true", help="keep the instructions; accept the current destination")
+    co.add_argument("--reconnect", action="store_true",
+                    help="accept Codex's current destination for the name (keeps the instructions unless new text is given)")
 
     cs = sub.add_parser("connection", help="show this session's saved instructions for a Codex chat")
     cs.add_argument("name")

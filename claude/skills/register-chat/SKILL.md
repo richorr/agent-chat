@@ -17,19 +17,22 @@ sends nothing and does not change permissions, the bridge policy, or any saved `
 1. Call `ListAgents`. Its first line is "This session is <name> [<ref>] …". Note `<name>` and `<ref>`.
 2. Depending on the arguments:
    - **`list`**: run `B chats` and show the result. Stop.
-   - **`unregister <chat>`**: run `B unregister <chat> --session <name>`, report the result. Stop.
+   - **`unregister <chat>`**: run `B unregister <chat> --session <name> --ref <ref>`, report the result. Stop.
    - **`<chat>`**: run `B register <chat> --session <name> --ref <ref>`.
    - **Nothing**: ask the user which name to claim. Suggest the project folder name.
 3. Read the result:
    - `REGISTERED` / `UNCHANGED` / `MOVED`: report which name now delivers to this session.
    - `CLAIMED: '<chat>' is registered to session <other>`: the name belongs to another session.
-     Check whether `<other>` appears in the `ListAgents` output from step 1, and tell the user
-     "`<chat>` is claimed by `<other>`, which is online/offline." Then ask whether to move it to this
-     session. Only if they say yes, run `B register <chat> --session <name> --ref <ref> --replace <other>`.
-     Never pass `--replace` without that yes.
+     `<other>` is printed as `name [ref]`. A registration is pinned to that exact ref, so a session
+     that reuses the same name, including a restarted one, counts as a different session.
+     Check whether a row with that name *and* ref appears in the `ListAgents` output from step 1,
+     and tell the user "`<chat>` is claimed by `<other>`, which is online/offline." Then ask whether
+     to move it to this session. Only if they say yes, run
+     `B register <chat> --session <name> --ref <ref> --replace '<other>'`, with `<other>` copied
+     exactly as printed. Never pass `--replace` without that yes.
 4. Tell the user: Codex sends to this chat by putting the name in a request's `project` field. For
    now, Codex requests sent to the project folder name also reach this chat, as long as it is the
    only chat registered from this project. Registration does not prove that delivery works end to end.
 
-If this session restarts and gets a new session name, the registration still points to the old
-session. Requests then come back to Codex as "offline" errors until the user runs /register-chat again.
+The registration is pinned to this session's name and ref. If the session restarts, requests come
+back to Codex as "offline" errors until the user runs /register-chat again and agrees to move the name.

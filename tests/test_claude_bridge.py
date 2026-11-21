@@ -111,7 +111,8 @@ class ClaudeBridgeTests(unittest.TestCase):
         self.register('pyroto-review', 'pyroto-7c', ref='d4a9b4')
         self.b.handle_request(self.drop(project='pyroto'))  # what Codex sends today
         self.assertIn('exactly "pyroto-7c"', self.router_calls[0])
-        self.assertIn('[ref] is "d4a9b4"', self.router_calls[0])
+        self.assertIn('[ref] must also be exactly "d4a9b4"', self.router_calls[0])
+        self.assertIn('"to" set to "pyroto-7c [d4a9b4]"', self.router_calls[0])
         self.assertIn('chat pyroto-review', self.router_calls[0])
         self.register('pyroto-docs', 'pyroto-2e')
         self.b.handle_request(self.drop(id='codex-9', project='pyroto'))
@@ -123,7 +124,7 @@ class ClaudeBridgeTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self.register('demo', 'demo-9f')
         self.assertIn('CLAIMED', str(cm.exception))
-        self.assertIn('--replace demo-1a', str(cm.exception))
+        self.assertIn("--replace 'demo-1a'", str(cm.exception))
         with self.assertRaises(SystemExit):
             self.register('demo', 'demo-9f', replace='wrong-00')
         self.assertIn('MOVED', self.register('demo', 'demo-9f', replace='demo-1a'))
@@ -131,10 +132,38 @@ class ClaudeBridgeTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.register('bad name!', 'demo-9f')
 
+    def test_ref_pins_registration_to_one_session(self):
+        self.register('pinned', 'demo-1a', ref='aaaaaa')
+        # a later session that reuses the name is a different owner
+        for ref in ('bbbbbb', None):
+            with self.assertRaises(SystemExit) as cm:
+                self.register('pinned', 'demo-1a', ref=ref)
+            self.assertIn("CLAIMED: 'pinned' is registered to session demo-1a [aaaaaa]", str(cm.exception))
+            with self.assertRaises(SystemExit):
+                self.run_cmd(self.b.cmd_unregister, chat='pinned', session='demo-1a', ref=ref)
+        with self.assertRaises(SystemExit):  # replacing needs the exact old owner
+            self.register('pinned', 'demo-1a', ref='bbbbbb', replace='demo-1a')
+        self.assertEqual(self.b.load_json(self.b.CHATS)['pinned']['ref'], 'aaaaaa')
+        self.assertIn('UNCHANGED', self.register('pinned', 'demo-1a', ref='aaaaaa'))
+        out = self.register('pinned', 'demo-1a', ref='bbbbbb', replace='demo-1a [aaaaaa]')
+        self.assertIn('MOVED', out)
+        self.assertEqual(self.b.load_json(self.b.CHATS)['pinned']['ref'], 'bbbbbb')
+        self.run_cmd(self.b.cmd_unregister, chat='pinned', session='demo-1a', ref='bbbbbb')
+        self.assertNotIn('pinned', self.b.load_json(self.b.CHATS))
+
+    def test_pinned_route_prompt_requires_name_and_ref_even_for_one_row(self):
+        self.register('pinned', 'demo-1a', ref='aaaaaa')
+        self.b.handle_request(self.drop(project='pinned'))
+        prompt = self.router_calls[0]
+        self.assertIn('Its [ref] must also be exactly "aaaaaa"', prompt)
+        self.assertIn('any other [ref] is a different session', prompt)
+        self.assertNotIn('If several rows', prompt)
+        self.assertIn('"to" set to "demo-1a [aaaaaa]"', prompt)
+
     def test_unregister_only_by_owner(self):
         with self.assertRaises(SystemExit):
-            self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-9f')
-        self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-1a')
+            self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-9f', ref=None)
+        self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-1a', ref=None)
         self.assertEqual(self.b.load_json(self.b.CHATS), {})
 
     def test_state_files_are_private(self):
@@ -156,6 +185,22 @@ class ClaudeBridgeTests(unittest.TestCase):
                                                body='new', body_file=None, reconnect=False))
         with self.assertRaises(SystemExit):
             self.run_cmd(self.b.cmd_connect, name='nope', session='me-11', body='x', body_file=None, reconnect=False)
+
+    def test_new_text_does_not_rebind_a_stale_connection(self):
+        self.set_codex_routes({'pyroto-review': 'uuid-1'})
+        save = dict(name='pyroto-review', session='demo-1a', body_file=None, reconnect=False)
+        self.run_cmd(self.b.cmd_connect, body='old rules', **save)
+        before = self.b.load_json(self.b.CONNECTIONS)
+        self.set_codex_routes({'pyroto-review': 'uuid-2'})
+        with self.assertRaises(SystemExit) as cm:
+            self.run_cmd(self.b.cmd_connect, body='new rules', **save)
+        self.assertIn('STALE', str(cm.exception))
+        self.assertEqual(self.b.load_json(self.b.CONNECTIONS), before)  # old connection intact
+        self.assertIn('reassigned', self.run_cmd(self.b.cmd_connection, name='pyroto-review', session='demo-1a'))
+        save['reconnect'] = True  # explicit reconnect may carry the new text
+        self.assertIn('RECONNECTED', self.run_cmd(self.b.cmd_connect, body='new rules', **save))
+        conn = self.b.load_json(self.b.CONNECTIONS)['demo-1a']['pyroto-review']
+        self.assertEqual((conn['destination'], conn['instructions']), ('uuid-2', 'new rules'))
 
     def test_reassigned_name_blocks_send_until_reconnect(self):
         self.set_codex_routes({'pyroto-review': 'uuid-1'})
