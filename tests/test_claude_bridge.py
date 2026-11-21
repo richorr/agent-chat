@@ -1,5 +1,7 @@
 """Tests for claude/bridge.py. The Haiku router is replaced with a stub; no model calls."""
 import argparse
+import contextlib
+import io
 import importlib.util
 import json
 import os
@@ -33,6 +35,22 @@ class ClaudeBridgeTests(unittest.TestCase):
         self.router_result = 'ROUTED demo-1a'
         self.b.run_router = lambda prompt: (self.router_calls.append(prompt) or (self.router_result, 0.001))
         self.b.log = lambda text: None
+        self.register('demo', 'demo-1a')
+
+    def register(self, chat, session, **kw):
+        args = dict(chat=chat, session=session, ref=None, replace=None)
+        args.update(kw)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.b.cmd_register(argparse.Namespace(**args))
+        return out.getvalue()
+
+    def run_cmd(self, fn, **kw):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            fn(argparse.Namespace(**kw))
+        return out.getvalue()
+
+    def set_codex_routes(self, routes):
+        (self.root / 'state' / 'codex-routes.json').write_text(json.dumps(routes))
 
     # -- helpers
     def drop(self, **fields):
@@ -71,22 +89,95 @@ class ClaudeBridgeTests(unittest.TestCase):
     def test_request_routed_records_pending_and_sends_reply_instructions(self):
         self.b.handle_request(self.drop())
         self.assertEqual(self.b.load_pending()['codex-1']['session'], 'demo-1a')
-        self.assertIn('"demo"', self.router_calls[0])
+        self.assertIn('exactly "demo-1a"', self.router_calls[0])
         self.assertIn('bridge.py reply codex-1', self.router_calls[0])
         self.assertEqual(self.outbox(), [])
 
-    def test_request_without_session_gets_error_response(self):
-        self.router_result = 'NO_SESSION'
+    def test_offline_registered_session_gets_error_not_another_session(self):
+        self.router_result = 'OFFLINE'
         self.b.handle_request(self.drop())
         (resp,) = self.outbox()
         self.assertEqual((resp['type'], resp['reply_to']), ('response', 'codex-1'))
-        self.assertTrue(resp['body'].startswith('ERROR: no running Claude session for demo'))
+        self.assertIn("ERROR: Claude chat 'demo' is registered to session demo-1a, which is offline", resp['body'])
         self.assertEqual(self.b.load_pending(), {})
+        self.assertIn('exactly "demo-1a"', self.router_calls[0])
+
+    def test_unregistered_name_is_not_dispatched(self):
+        self.b.handle_request(self.drop(project='other'))
+        self.assertEqual(self.router_calls, [])
+        self.assertIn("no Claude chat is registered as 'other'", self.outbox()[0]['body'])
+
+    def test_project_name_still_resolves_to_its_registered_chat(self):
+        self.register('pyroto-review', 'pyroto-7c', ref='d4a9b4')
+        self.b.handle_request(self.drop(project='pyroto'))  # what Codex sends today
+        self.assertIn('exactly "pyroto-7c"', self.router_calls[0])
+        self.assertIn('[ref] is "d4a9b4"', self.router_calls[0])
+        self.assertIn('chat pyroto-review', self.router_calls[0])
+        self.register('pyroto-docs', 'pyroto-2e')
+        self.b.handle_request(self.drop(id='codex-9', project='pyroto'))
+        self.assertIn('matches several registered Claude chats (pyroto-docs, pyroto-review)', self.outbox()[0]['body'])
+        self.assertEqual(len(self.router_calls), 1)
+
+    def test_register_refuses_claimed_name_until_replace(self):
+        self.assertIn('UNCHANGED', self.register('demo', 'demo-1a'))
+        with self.assertRaises(SystemExit) as cm:
+            self.register('demo', 'demo-9f')
+        self.assertIn('CLAIMED', str(cm.exception))
+        self.assertIn('--replace demo-1a', str(cm.exception))
+        with self.assertRaises(SystemExit):
+            self.register('demo', 'demo-9f', replace='wrong-00')
+        self.assertIn('MOVED', self.register('demo', 'demo-9f', replace='demo-1a'))
+        self.assertEqual(self.b.load_json(self.b.CHATS)['demo']['session'], 'demo-9f')
+        with self.assertRaises(SystemExit):
+            self.register('bad name!', 'demo-9f')
+
+    def test_unregister_only_by_owner(self):
+        with self.assertRaises(SystemExit):
+            self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-9f')
+        self.run_cmd(self.b.cmd_unregister, chat='demo', session='demo-1a')
+        self.assertEqual(self.b.load_json(self.b.CHATS), {})
+
+    def test_state_files_are_private(self):
+        self.assertEqual(os.stat(self.b.CHATS).st_mode & 0o777, 0o600)
+
+    # -- connections (sending side)
+    def test_connect_saves_without_sending_or_registering(self):
+        self.set_codex_routes({'pyroto-review': 'uuid-1'})
+        out = self.run_cmd(self.b.cmd_connect, name='pyroto-review', session='me-11', body='When a PR is ready, ask.',
+                           body_file=None, reconnect=False)
+        self.assertIn('SAVED', out)
+        self.assertEqual(self.outbox(), [])
+        self.assertNotIn('me-11', json.dumps(self.b.load_json(self.b.CHATS)))
+        shown = self.run_cmd(self.b.cmd_connection, name='pyroto-review', session='me-11')
+        self.assertIn('[ok]', shown)
+        self.assertIn('When a PR is ready, ask.', shown)
+        self.assertIn('NONE', self.run_cmd(self.b.cmd_connection, name='pyroto-review', session='other-22'))
+        self.assertIn('REPLACED', self.run_cmd(self.b.cmd_connect, name='pyroto-review', session='me-11',
+                                               body='new', body_file=None, reconnect=False))
+        with self.assertRaises(SystemExit):
+            self.run_cmd(self.b.cmd_connect, name='nope', session='me-11', body='x', body_file=None, reconnect=False)
+
+    def test_reassigned_name_blocks_send_until_reconnect(self):
+        self.set_codex_routes({'pyroto-review': 'uuid-1'})
+        self.run_cmd(self.b.cmd_connect, name='pyroto-review', session='demo-1a', body='rules',
+                     body_file=None, reconnect=False)
+        self.set_codex_routes({'pyroto-review': 'uuid-2'})
+        self.assertIn('reassigned', self.run_cmd(self.b.cmd_names, session='demo-1a'))
+        with self.assertRaises(SystemExit) as cm:
+            self.b.cmd_send(self.send_args(project='pyroto-review'))
+        self.assertIn('reconnect', str(cm.exception))
+        self.assertEqual(self.outbox(), [])
+        self.run_cmd(self.b.cmd_connect, name='pyroto-review', session='demo-1a', body=None, body_file=None,
+                     reconnect=True)
+        self.assertIn('rules', self.run_cmd(self.b.cmd_connection, name='pyroto-review', session='demo-1a'))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.b.cmd_send(self.send_args(project='pyroto-review'))
+        self.assertEqual(len(self.outbox()), 1)
 
     def test_router_failure_gets_error_response(self):
         self.router_result = 'FAILED router timed out'
         self.b.handle_request(self.drop())
-        self.assertIn('could not deliver', self.outbox()[0]['body'])
+        self.assertIn("could not deliver to Claude chat 'demo'", self.outbox()[0]['body'])
 
     def test_reply_sends_response_once(self):
         self.b.handle_request(self.drop())
@@ -132,7 +223,7 @@ class ClaudeBridgeTests(unittest.TestCase):
         self.b.handle_request(self.drop(purpose='code-review'))
         self.assertIn("does not accept self-initiated 'code-review'", self.outbox()[0]['body'])
         self.assertEqual(self.router_calls, [])
-        self.b.handle_request(self.drop(id='codex-4', purpose='design-feedback'))
+        self.b.handle_request(self.drop(id='codex-4', purpose='design-feedback'))  # policy uses the session's project
         self.assertEqual(len(self.router_calls), 1)
 
     def test_policy_changes_need_a_terminal(self):
