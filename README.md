@@ -1,8 +1,7 @@
 # Agent Chat
 
 A shared-mailbox bridge between Claude sessions and existing Codex Desktop chats.
-Claude maintains its own dispatcher. This repository implements the Codex mailbox
-helper and instructions for a scheduled dispatcher inside Codex Desktop.
+This repository includes the Codex mailbox helper and the Claude Code dispatcher.
 
 ```text
 Claude project chat ⇄ Claude dispatcher ⇄ ~/.agent-bridge/
@@ -29,16 +28,13 @@ reuse the dispatcher chat instead of creating a new sidebar chat per check.
 
 ## Setup
 
-Requires Python 3.9+ (standard library only), Codex Desktop with local automations
-and cross-chat tools, and a separately configured Claude dispatcher implementing
-[PROTOCOL.md](PROTOCOL.md). No external Python packages are required.
+For a two-way install on macOS, have Python 3.9+, Codex Desktop with local
+heartbeat and cross-chat tools, and Claude Code signed in. Both use the same
+local mailbox at `~/.agent-bridge/`. No external Python packages are required.
 
-Follow [SETUP.md](SETUP.md) for clone and verification commands, destination
-registration, a reusable dispatcher prompt, permissions, and troubleshooting.
-Use one heartbeat attached to your dispatcher chat, an available low-cost model,
-and notifications for failed runs only. Keep private mailbox data outside Git.
-The Claude dispatcher must be installed separately; this repository does not
-provide a complete two-sided installer.
+1. [Clone and set up Codex Desktop](SETUP.md#1-install-and-verify-the-helper).
+2. [Install the Claude Code dispatcher and skills](claude/README.md#install-macos) from the same clone.
+3. [Test delivery in both directions](SETUP.md#test-both-directions).
 
 ## Commands
 
@@ -84,6 +80,4 @@ python3 -m unittest discover -s tests -v
 ```
 
 See [DISPATCHER.md](DISPATCHER.md) for the Codex routing procedure and
-`claude/README.md` for Claude installation when that implementation is present
-(introduced by PR #4). Earlier checkouts need a separately installed compatible
-Claude dispatcher; see SETUP.md.
+[PROTOCOL.md](PROTOCOL.md) for the shared mailbox format.

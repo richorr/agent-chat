@@ -1,16 +1,12 @@
 # Install and share Agent Chat
 
-This repository supplies the Codex half of a local, filesystem-based bridge.
-It is not a hosted service or a complete installer for Claude. Both dispatchers
-must have access to the same mailbox. Use it only for already-authorized work.
+Set up Codex Desktop and Claude Code from the same clone on macOS. Both
+dispatchers use the local mailbox at `~/.agent-bridge/`.
 
 ## 1. Install and verify the helper
 
-Use macOS or a Unix-like environment with Python 3.9+; registration uses the
-standard library's `fcntl` file locking and is not a native Windows implementation.
-You also need Codex Desktop with local heartbeat automations and cross-chat tools,
-and a separately installed Claude dispatcher compatible with [PROTOCOL.md](PROTOCOL.md).
-No Python dependencies need installing.
+Use Python 3.9+, Codex Desktop with local heartbeat automations and cross-chat
+tools, and Claude Code signed in. No external Python packages are required.
 
 ```sh
 git clone https://github.com/richorr/agent-chat.git
@@ -94,7 +90,7 @@ Saving a connection leaves incoming dispatch opt-in and sends no message.
 The skill checks the saved instructions during an active chat turn. The existing
 heartbeat handles Claude mailbox delivery and replies.
 
-## 3. Attach one heartbeat and test delivery
+## 3. Attach one heartbeat
 
 In **Agent Chat Dispatch**, ask Codex to create a local heartbeat attached to that
 existing chat, every five minutes, with notifications for failed runs only. Record
@@ -116,24 +112,21 @@ ID and notification preferences. Do not leave a second dispatcher active. Once
 verified, archive old dispatcher run chats; do not archive registered destinations.
 Route registration alone does not alter the automation's target or scheduling mode.
 
-Configure Claude using `claude/README.md` and the protocol when the Claude
-implementation is present in your checkout (introduced by PR #4). That guide
-installs `claude/bridge.py` as `~/.agent-bridge/bin/bridge.py` and configures the
-router under `~/.agent-bridge/router`. Earlier checkouts require a separately
-installed compatible Claude dispatcher; root `CLAUDE.md` is not its install guide.
-Register the receiving Claude session with its own `/register-chat NAME` skill.
+## Test both directions
 
-For an end-to-end check, ask a registered work chat to send a harmless request to a
-registered Claude chat. Write the body to a text file and run from the clone:
+1. Follow the [Claude Code installation guide](claude/README.md#install-macos)
+   from this clone. In a running Claude session, use `/register-chat claude-test`.
+   In a separate Codex work chat, use `/register-chat codex-test`.
+2. In `codex-test`, enter `/chat-with claude-test` with the instruction
+   “When I ask for a bridge test, send only ‘Please reply ACK.’” Then ask for a
+   bridge test and approve the displayed destination and message. Keep Claude
+   running and verify that the ACK returns to the originating Codex chat.
+3. In `claude-test`, enter `/chat-with codex-test` with the same instruction.
+   Ask for a bridge test, approve the message, and verify that the ACK returns
+   to the originating Claude session.
 
-```sh
-python3 desktop_bridge.py send --project example-chat --origin VERIFIED_ORIGIN_CHAT_UUID --body-file /tmp/bridge-request.txt
-```
-
-A returned request ID means queued, not delivered. Verify the matching reply arrives
-in the originating chat, and have Claude send a harmless request to a registered
-Codex project to verify the reverse direction. Wait for normal polling; do not
-resend because of delay. Normal destination approvals still apply.
+A request ID confirms queuing. Allow the heartbeat to run and leave the receiving
+chat idle for delivery.
 
 ## Troubleshooting and recovery
 

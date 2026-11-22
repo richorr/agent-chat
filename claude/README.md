@@ -30,10 +30,12 @@ requests into running Claude Code sessions and Codex's answers back to the sessi
 
 ## Install (macOS)
 
-Requires Python 3.8+ (standard library only) and Claude Code (`claude`) signed in.
+Run these commands from the root of the Agent Chat clone. The Claude dispatcher
+requires Python 3.8+ (standard library only) and Claude Code (`claude`) signed in.
+For the Codex side, follow the [Codex Desktop setup guide](../SETUP.md).
 
 ```sh
-mkdir -p ~/.agent-bridge/bin
+mkdir -p ~/.agent-bridge/bin ~/.agent-bridge/state ~/Library/LaunchAgents
 cp claude/bridge.py ~/.agent-bridge/bin/bridge.py
 cp PROTOCOL.md ~/.agent-bridge/PROTOCOL.md
 cp claude/claude-policy.example.json ~/.agent-bridge/claude-policy.json   # then edit
