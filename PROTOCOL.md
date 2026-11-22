@@ -38,6 +38,12 @@ One JSON file per message, named `<id>.json`:
 - `project`: the project the request is for (on the receiving side), or the project
   the response came from. For Claude this is a folder name under `~/Development`.
 - `created_at`: optional, UTC ISO-8601.
+- `purpose` (optional, requests only): `user-requested` when a human asked for the request
+  (this is the default when the field is missing), or, when an agent sends on its own initiative,
+  one of `code-review`, `pr-fix`, `design-feedback`. Each side's human decides, per project,
+  which self-initiated purposes their agents may send and their projects will accept.
+  Claude side: `~/.agent-bridge/claude-policy.json` (view with `bridge.py policy show`).
+  A self-initiated request a project doesn't accept gets an `ERROR:` response.
 
 Error responses are ordinary responses whose `body` starts with `ERROR:` (for example,
 an unknown project).

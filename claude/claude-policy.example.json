@@ -1,0 +1,11 @@
+{
+  "_doc": "Copy to ~/.agent-bridge/claude-policy.json. Lists which requests Claude agents may send to Codex on their own initiative, and which self-initiated Codex requests each Claude project accepts. Edit with `python3 ~/.agent-bridge/bin/bridge.py policy ...` in a terminal.",
+  "default": {
+    "self_initiated": ["code-review", "pr-fix", "design-feedback"]
+  },
+  "projects": {
+    "example-project": {
+      "self_initiated": ["code-review"]
+    }
+  }
+}
