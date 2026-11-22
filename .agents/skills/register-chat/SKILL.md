@@ -1,14 +1,16 @@
 ---
 name: register-chat
-description: Register the current Codex chat or verify the current Claude session for the shared agent-bridge dispatcher when the user asks to register a chat or make it reachable through the bridge.
+description: Register the current Codex chat for the shared agent-bridge dispatcher when the user asks to register a chat or make it reachable through the bridge.
 ---
 
 # Register chat
 
 Use the existing dispatcher; do not start another dispatcher, change its schedule,
 send test messages, or alter permission policy as part of registration.
-The project is the exact receiving project name, normally the repository folder
-name. Use an explicitly supplied project name when provided.
+In Codex, the project is the incoming route name. Use the name supplied with
+`/register-chat NAME`, or the repository folder name when no name is supplied.
+This opts the current chat into incoming dispatch for that name. A sending chat
+can discover it with `/chat-with`.
 
 ## Codex
 
@@ -26,30 +28,9 @@ name. Use an explicitly supplied project name when provided.
 3. Report the project and verified destination from the helper receipt. Registration
    does not prove the dispatcher is running or that end-to-end delivery works.
 
-## Claude
-
-Claude's current dispatcher does not use a persistent chat registry. It discovers
-live peer sessions through its coordinator's `ListAgents` capability.
-
-1. Call `ListAgents` and read this session's actual name from its identity header
-   (`This session is <name>`). The peer list excludes the calling session; absence
-   from that list is expected. Names must be `<project>-<two hex characters>`;
-   remove only that final suffix when checking the project.
-2. If this session matches, report it as discoverable, with no route-file write.
-   Use the peer list only to identify other sessions for the same project. If any
-   match, explain that the dispatcher prefers idle sessions, then the most recently
-   started; this does not pin this particular chat.
-   If the identity header is missing, this session is misnamed, or the tools are unavailable,
-   report that registration is not established and what is missing. Do not invent
-   a Claude registry or modify Claude's dispatcher to work around it.
-3. Never put a Claude session name in `codex-routes.json`. If the user instead asks
-   Claude to register a Codex destination, use the Codex helper with a verified,
-   explicitly identified Codex UUID; do not treat Claude's session as that UUID.
-
 ## Storage and portability
 
-The tracked source is `.agents/skills/register-chat/SKILL.md`; the repository's
-`.claude/skills/register-chat` symlink exposes the same skill to Claude. Keep the
+The tracked source is `.agents/skills/register-chat/SKILL.md`. Keep the
 helper and skill together when moving or cloning the repository. No machine-specific
 checkout path belongs in the skill. Python 3 and a local filesystem are required.
 Personal mappings live in `~/.agent-bridge/state/codex-routes.json`, outside Git.

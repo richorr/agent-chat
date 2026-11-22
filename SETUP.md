@@ -44,8 +44,8 @@ python3 desktop_bridge.py register --project example-project --chat-id NEW_UUID 
 ```
 
 The included `.agents/skills/register-chat/SKILL.md` provides the same workflow to
-agents. `.claude/skills/register-chat` is a relative symlink to that skill; preserve
-it when sharing the checkout. Keep the skill and helper in their repository layout.
+Codex. Claude ships its own registration skill. Keep the Codex skill and helper
+in their repository layout.
 
 **Keep the dispatcher chat separate from work destinations.** It cannot send to
 itself and does no project work. Registering its UUID as a work route creates a
@@ -58,6 +58,41 @@ The mailbox is outside the workspace. Registration needs permission to create
 archive, staging, and SQLite state. If sandbox access is blocked, use the normal
 approval/escalation flow for the exact helper command. Do not change filesystem
 permissions or bypass a denial. A failed registration is not a registered route.
+
+### Connect from a sending chat
+
+In the receiving Codex chat, use `/register-chat pyroto-review` to claim the name
+and opt into incoming dispatch. In the sending chat, use the repository's
+`chat-with` skill:
+
+```text
+/chat-with pyroto-review
+When a PR is ready and its checks pass, ask for a review.
+Share the PR link and the areas I want reviewed.
+```
+
+Use `/chat-with` to discover registered Codex names and list your saved connections.
+Use `/chat-with pyroto-review` to read the instructions. Include revised text to
+replace them. To reach Claude, use a name registered by the receiving Claude
+session. You can also specify that name when saving a local alias. Connections
+bind to the registered recipient.
+If the name moves to another chat, confirm the new receiving chat when reconnecting.
+
+The skill lives in `.agents/skills/chat-with`. Send the command as chat text or
+select `$chat-with` in Codex's skill picker. To use the skill from other projects,
+expose the repository skill in your user-wide Codex skills directory (for example,
+symlink the skill directory so it can still locate the bridge helper). To have
+a sender consult these instructions on later work, add this line to that project's
+`AGENTS.md`:
+
+> Before proposing cross-chat work, consult the current chat's saved connections
+> with the chat-with skill and use their instructions to decide when to reach out
+> and what to share. Get approval for the exact destination and text before sending.
+
+Connections are stored per sending chat under `~/.agent-bridge/state/chat-with/`.
+Saving a connection leaves incoming dispatch opt-in and sends no message.
+The skill checks the saved instructions during an active chat turn. The existing
+heartbeat handles Claude mailbox delivery and replies.
 
 ## 3. Attach one heartbeat and test delivery
 
@@ -86,15 +121,13 @@ implementation is present in your checkout (introduced by PR #4). That guide
 installs `claude/bridge.py` as `~/.agent-bridge/bin/bridge.py` and configures the
 router under `~/.agent-bridge/router`. Earlier checkouts require a separately
 installed compatible Claude dispatcher; root `CLAUDE.md` is not its install guide.
-Ask the Claude
-coordinator to verify a live session named `<project>-<two hex characters>`;
-a Codex route does not prove Claude availability. Do not use Claude's sender from Codex.
+Register the receiving Claude session with its own `/register-chat NAME` skill.
 
 For an end-to-end check, ask a registered work chat to send a harmless request to a
-verified Claude project. Write the body to a text file and run from the clone:
+registered Claude chat. Write the body to a text file and run from the clone:
 
 ```sh
-python3 desktop_bridge.py send --project example-project --origin VERIFIED_ORIGIN_CHAT_UUID --body-file /tmp/bridge-request.txt
+python3 desktop_bridge.py send --project example-chat --origin VERIFIED_ORIGIN_CHAT_UUID --body-file /tmp/bridge-request.txt
 ```
 
 A returned request ID means queued, not delivered. Verify the matching reply arrives

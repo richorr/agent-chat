@@ -10,3 +10,4 @@ __pycache__/
 *.log
 codex-routes.json
 .DS_Store
+/state/chat-with/
