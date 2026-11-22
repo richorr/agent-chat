@@ -58,7 +58,8 @@ cp claude/claude-policy.example.json ~/.agent-bridge/claude-policy.json   # then
    ```
    Then run `/register-chat <name>` in each session that should receive Codex requests.
 3. **Let sessions run the bridge without a prompt each time** by adding these rules to
-   `permissions.allow` in `~/.claude/settings.json`:
+   `permissions.allow` in `~/.claude/settings.json`. Replace `HOME_DIR` with
+   the absolute path to your home directory, for example `/Users/you`.
    ```json
    "Bash(python3 ~/.agent-bridge/bin/bridge.py:*)",
    "Bash(python3 HOME_DIR/.agent-bridge/bin/bridge.py:*)"

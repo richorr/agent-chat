@@ -28,11 +28,12 @@ reuse the dispatcher chat instead of creating a new sidebar chat per check.
 
 ## Setup
 
-For a two-way install on macOS, have Python 3.9+, Codex Desktop with local
+For a two-way install on macOS, have Python 3.8+, Codex Desktop with local
 heartbeat and cross-chat tools, and Claude Code signed in. Both use the same
 local mailbox at `~/.agent-bridge/`. No external Python packages are required.
 
-1. [Clone and set up Codex Desktop](SETUP.md#1-install-and-verify-the-helper).
+1. [Set up Codex Desktop](SETUP.md). Follow sections 1–3 to install the helper,
+   start the dispatcher heartbeat, and register work chats.
 2. [Install the Claude Code dispatcher and skills](claude/README.md#install-macos) from the same clone.
 3. [Test delivery in both directions](SETUP.md#test-both-directions).
 

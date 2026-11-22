@@ -5,7 +5,7 @@ dispatchers use the local mailbox at `~/.agent-bridge/`.
 
 ## 1. Install and verify the helper
 
-Use Python 3.9+, Codex Desktop with local heartbeat automations and cross-chat
+Use Python 3.8+, Codex Desktop with local heartbeat automations and cross-chat
 tools, and Claude Code signed in. No external Python packages are required.
 
 ```sh
@@ -21,7 +21,32 @@ chat named **Agent Chat Dispatch**. The mailbox helper itself makes no model cal
 The scheduler still consumes model turns; polling backs off from 5 to 30 minutes.
 Keep the app and local scheduler available for delivery.
 
-## 2. Register work destinations
+## 2. Attach one heartbeat
+
+In **Agent Chat Dispatch**, ask Codex to create a local heartbeat attached to that
+existing chat, every five minutes, with notifications for failed runs only. Record
+its returned automation ID locally. Use this prompt, replacing the checkout path
+and automation ID with your own values:
+
+> Run the Codex mailbox dispatcher from CHECKOUT_PATH according to DISPATCHER.md.
+> The user authorizes forwarding requests and replies only for configured routes.
+> Stop if that file is missing. Use existing heartbeat AUTOMATION_ID attached to
+> this chat. Preserve its kind, target chat, and other settings when adjusting its
+> interval to next_poll_minutes. Do not create chats or additional automations.
+> Keep durable delivery state in the mailbox. Do no project work yourself. Leave
+> self-targeted actions pending and report the routing conflict. Keep each run
+> brief and report only errors or meaningful delivery results.
+
+Verify the saved automation targets this chat and has kind `heartbeat`. If migrating
+an existing standalone automation, update that automation in place; preserve its
+ID and notification preferences. Do not leave a second dispatcher active. Once
+verified, archive old dispatcher run chats; do not archive registered destinations.
+Route registration alone does not alter the automation's target or scheduling mode.
+
+Wait for its first successful run before registering any work chats. That run
+records the dispatcher’s identity so registration can reject it as a destination.
+
+## 3. Register work destinations
 
 Create or choose an existing chat for each receiving project. Use Codex chat tools
 to verify its UUID; a project name or chat title is not a UUID. From the clone:
@@ -90,33 +115,15 @@ Saving a connection leaves incoming dispatch opt-in and sends no message.
 The skill checks the saved instructions during an active chat turn. The existing
 heartbeat handles Claude mailbox delivery and replies.
 
-## 3. Attach one heartbeat
-
-In **Agent Chat Dispatch**, ask Codex to create a local heartbeat attached to that
-existing chat, every five minutes, with notifications for failed runs only. Record
-its returned automation ID locally. Use this prompt, replacing the checkout path
-and automation ID with your own values:
-
-> Run the Codex mailbox dispatcher from CHECKOUT_PATH according to DISPATCHER.md.
-> The user authorizes forwarding requests and replies only for configured routes.
-> Stop if that file is missing. Use existing heartbeat AUTOMATION_ID attached to
-> this chat. Preserve its kind, target chat, and other settings when adjusting its
-> interval to next_poll_minutes. Do not create chats or additional automations.
-> Keep durable delivery state in the mailbox. Do no project work yourself. Leave
-> self-targeted actions pending and report the routing conflict. Keep each run
-> brief and report only errors or meaningful delivery results.
-
-Verify the saved automation targets this chat and has kind `heartbeat`. If migrating
-an existing standalone automation, update that automation in place; preserve its
-ID and notification preferences. Do not leave a second dispatcher active. Once
-verified, archive old dispatcher run chats; do not archive registered destinations.
-Route registration alone does not alter the automation's target or scheduling mode.
-
 ## Test both directions
+
+Start with the [Codex dispatcher heartbeat](#2-attach-one-heartbeat) running
+and its first successful poll complete.
 
 1. Follow the [Claude Code installation guide](claude/README.md#install-macos)
    from this clone. In a running Claude session, use `/register-chat claude-test`.
-   In a separate Codex work chat, use `/register-chat codex-test`.
+   Open a second Codex chat in the Agent Chat project so it can use the
+   included skills. In that chat, use `/register-chat codex-test`.
 2. In `codex-test`, enter `/chat-with claude-test` with the instruction
    “When I ask for a bridge test, send only ‘Please reply ACK.’” Then ask for a
    bridge test and approve the displayed destination and message. Keep Claude
@@ -137,7 +144,7 @@ chat idle for delivery.
 | Route conflict | Verify the old and new UUIDs and explicitly replace with `--replace-chat-id`; do not overwrite other routes. |
 | Self-targeted action | Correct the route to a separate work chat; the dispatcher must not claim or send it to itself. |
 | No immediate delivery | Check scheduler availability and the current 5–30 minute interval. Busy destinations remain pending. |
-| Unknown project or no Claude session | Check the exact receiving project name, local Codex route, and live Claude coordinator discovery. |
+| Unknown Claude chat or registered session offline | Check the name with `python3 ~/.agent-bridge/bin/bridge.py chats`. If the name is missing, run `/register-chat <name>` in the receiving Claude session. If the original session ended, confirm the new session when moving the name. |
 | Claimed message has no clear result | Inspect the destination for its exact `[agent-bridge ID]` marker. Never blindly resend a claimed action. Follow DISPATCHER.md to resolve an ambiguous delivery. |
 | Timeout | Codex expires only pending, unclaimed requests after one hour. Claimed work and informational responses do not expire. Inspect destination state before submitting again. |
 
