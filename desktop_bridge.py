@@ -126,21 +126,37 @@ def read_routes(state):
     return routes
 
 
+def claude_identity(chats, name):
+    entry = chats.get(name)
+    if not entry:
+        return None
+    return {'session': entry['session'], 'ref': entry.get('ref')}
+
+
 def chat_with(home, origin, name=None, instructions=None, claude_project=None, reconnect=False):
     """Read or save outgoing instructions for one verified Codex chat."""
     origin = str(uuid.UUID(origin))
     state = Path(home) / 'state'
     config = state / 'chat-with' / f'{origin}.json'
     routes = read_routes(state)
+    dispatcher = read_json(state / 'codex-dispatcher.json').get('threadId')
+    claude_chats = read_json(state / 'claude-chats.json')
     if instructions is None:
         connections = read_json(config)
         if name is None:
-            return {'registeredCodexNames': sorted(alias for alias, target in routes.items() if target != origin),
+            return {'registeredCodexNames': sorted(alias for alias, target in routes.items()
+                                                   if target not in (origin, dispatcher)),
+                    'registeredClaudeNames': sorted(claude_chats),
                     'connections': connections}
         connection = connections.get(name)
         if connection is None:
             return {'name': name, 'saved': False, 'registeredCodex': name in routes}
-        current = connection['provider'] == 'claude' or routes.get(name) == connection['destination']
+        destination = connection['destination']
+        if connection['provider'] == 'claude':
+            identity = claude_identity(claude_chats, destination)
+            current = identity is not None and identity == connection.get('identity')
+        else:
+            current = destination != dispatcher and routes.get(name) == destination
         return {'name': name, 'saved': True, 'routeCurrent': current, **connection}
 
     if not name or name != name.strip() or not instructions.strip():
@@ -152,23 +168,36 @@ def chat_with(home, origin, name=None, instructions=None, claude_project=None, r
         previous = connections.get(name)
         if claude_project is not None:
             if not claude_project or any(character.isspace() for character in claude_project):
-                raise ValueError('expected a Claude project name')
+                raise ValueError('expected a registered Claude chat name')
             destination = claude_project
             provider = 'claude'
-        elif previous and previous['provider'] == 'claude' and not reconnect:
+        elif previous and previous['provider'] == 'claude':
             destination = previous['destination']
             provider = 'claude'
         else:
             destination = routes.get(name)
-            if destination is None:
-                raise ValueError(f'unknown Codex route {name!r}; register it or specify a verified Claude project')
-            if str(uuid.UUID(destination)) == origin:
-                raise ValueError('a chat cannot connect to itself')
-            provider = 'codex'
+            if destination is None and name in claude_chats:
+                provider = 'claude'
+                destination = name
+            elif destination is None:
+                raise ValueError(f'unknown Codex route {name!r}; register it or specify a registered Claude chat')
+            else:
+                if str(uuid.UUID(destination)) == origin:
+                    raise ValueError('a chat cannot connect to itself')
+                if destination == dispatcher:
+                    raise ValueError('the dispatcher cannot receive work')
+                provider = 'codex'
         if previous and not reconnect and (previous['provider'], previous['destination']) != (provider, destination):
             raise ValueError('destination changed; confirm the new destination and use --reconnect')
         connection = {'provider': provider, 'destination': destination, 'instructions': instructions,
                       'approval': 'ask'}
+        if provider == 'claude':
+            identity = claude_identity(claude_chats, destination)
+            if identity is None:
+                raise ValueError(f'unknown Claude chat {destination!r}; register it in Claude first')
+            if previous and not reconnect and previous.get('identity') != identity:
+                raise ValueError('destination changed; confirm the new destination and use --reconnect')
+            connection['identity'] = identity
         connections[name] = connection
         write_json(config, connections)
     return {'name': name, 'saved': True, **connection}
@@ -184,6 +213,8 @@ def register_chat(home, project, chat_id, replace_chat_id=None):
     config = state / 'codex-routes.json'
     with (state / 'codex-routes.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if chat_id == read_json(state / 'codex-dispatcher.json').get('threadId'):
+            raise ValueError('the dispatcher cannot receive work')
         routes = read_routes(state)
         previous = routes.get(project)
         if previous != chat_id:
@@ -203,7 +234,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument('--home', type=Path, default=DEFAULT_HOME)
     sub = p.add_subparsers(dest='command', required=True)
-    sub.add_parser('scan', allow_abbrev=False)
+    c = sub.add_parser('scan', allow_abbrev=False)
+    c.add_argument('--dispatcher-chat-id', type=uuid.UUID)
     c = sub.add_parser('claim', allow_abbrev=False); c.add_argument('id')
     c = sub.add_parser('complete', allow_abbrev=False); c.add_argument('id'); c.add_argument('--body-file', type=Path, required=True)
     c = sub.add_parser('send', allow_abbrev=False); c.add_argument('--project', required=True); c.add_argument('--origin', required=True); c.add_argument('--body-file', type=Path, required=True)
@@ -239,7 +271,13 @@ def main():
         return
     b = DesktopBridge(args.home)
     try:
-        if args.command == 'scan': result = b.scan()
+        if args.command == 'scan':
+            if args.dispatcher_chat_id:
+                config = args.home / 'state/codex-dispatcher.json'
+                dispatcher = {'threadId': str(args.dispatcher_chat_id)}
+                if read_json(config) != dispatcher:
+                    write_json(config, dispatcher)
+            result = b.scan()
         elif args.command == 'claim': result = b.claim(args.id)
         elif args.command == 'complete': result = b.complete(args.id, args.body_file.read_text())
         else: result = {'id': b.send(args.project, args.body_file.read_text(), args.origin)}

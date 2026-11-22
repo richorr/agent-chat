@@ -44,8 +44,8 @@ python3 desktop_bridge.py register --project example-project --chat-id NEW_UUID 
 ```
 
 The included `.agents/skills/register-chat/SKILL.md` provides the same workflow to
-agents. `.claude/skills/register-chat` is a relative symlink to that skill; preserve
-it when sharing the checkout. Keep the skill and helper in their repository layout.
+Codex. Claude ships its own registration skill. Keep the Codex skill and helper
+in their repository layout.
 
 **Keep the dispatcher chat separate from work destinations.** It cannot send to
 itself and does no project work. Registering its UUID as a work route creates a
@@ -73,8 +73,9 @@ Share the PR link and the areas I want reviewed.
 
 Use `/chat-with` to discover registered Codex names and list your saved connections.
 Use `/chat-with pyroto-review` to read the instructions. Include revised text to
-replace them. To reach Claude, use the coordinator's project name or specify it
-when saving a local alias. A saved Codex connection binds to the registered UUID.
+replace them. To reach Claude, use a name registered by the receiving Claude
+session. You can also specify that name when saving a local alias. Connections
+bind to the registered recipient.
 If the name moves to another chat, confirm the new receiving chat when reconnecting.
 
 The skill lives in `.agents/skills/chat-with`. Send the command as chat text or
@@ -120,15 +121,13 @@ implementation is present in your checkout (introduced by PR #4). That guide
 installs `claude/bridge.py` as `~/.agent-bridge/bin/bridge.py` and configures the
 router under `~/.agent-bridge/router`. Earlier checkouts require a separately
 installed compatible Claude dispatcher; root `CLAUDE.md` is not its install guide.
-Ask the Claude
-coordinator to verify a live session named `<project>-<two hex characters>`;
-a Codex route does not prove Claude availability. Do not use Claude's sender from Codex.
+Register the receiving Claude session with its own `/register-chat NAME` skill.
 
 For an end-to-end check, ask a registered work chat to send a harmless request to a
-verified Claude project. Write the body to a text file and run from the clone:
+registered Claude chat. Write the body to a text file and run from the clone:
 
 ```sh
-python3 desktop_bridge.py send --project example-project --origin VERIFIED_ORIGIN_CHAT_UUID --body-file /tmp/bridge-request.txt
+python3 desktop_bridge.py send --project example-chat --origin VERIFIED_ORIGIN_CHAT_UUID --body-file /tmp/bridge-request.txt
 ```
 
 A returned request ID means queued, not delivered. Verify the matching reply arrives

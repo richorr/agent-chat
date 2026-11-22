@@ -53,9 +53,15 @@ class ChatWithTests(unittest.TestCase):
         reconnected = chat_with(self.home, SENDER, 'review', 'Share the PR link', reconnect=True)
         self.assertEqual(reconnected['destination'], OTHER)
 
-    def test_claude_connection_is_explicit_and_persists_across_instruction_updates(self):
+    def test_claude_connection_pins_the_registered_session_and_ref(self):
         with self.assertRaises(ValueError):
             chat_with(self.home, SENDER, 'review', 'Share the PR link')
+        with self.assertRaisesRegex(ValueError, 'unknown Claude chat'):
+            chat_with(self.home, SENDER, 'review', 'Share the PR link', 'pyroto')
+        chats = self.home / 'state/claude-chats.json'
+        entry = {'session': 'pyroto-ab', 'ref': 'old'}
+        chats.write_text(json.dumps({'pyroto': entry}))
+        self.assertEqual(chat_with(self.home, SENDER)['registeredClaudeNames'], ['pyroto'])
         chat_with(self.home, SENDER, 'review', 'Share the PR link', 'pyroto')
         register_chat(self.home, 'review', RECEIVER)
         chat_with(self.home, SENDER, 'review', 'Share the check results')
@@ -63,3 +69,21 @@ class ChatWithTests(unittest.TestCase):
         self.assertEqual(saved['provider'], 'claude')
         self.assertEqual(saved['destination'], 'pyroto')
         self.assertEqual(saved['instructions'], 'Share the check results')
+        self.assertTrue(saved['routeCurrent'])
+        entry['ref'] = 'new'
+        chats.write_text(json.dumps({'pyroto': entry}))
+        self.assertFalse(chat_with(self.home, SENDER, 'review')['routeCurrent'])
+        with self.assertRaisesRegex(ValueError, '--reconnect'):
+            chat_with(self.home, SENDER, 'review', 'Share the PR link')
+        chat_with(self.home, SENDER, 'review', 'Share the PR link', reconnect=True)
+        self.assertTrue(chat_with(self.home, SENDER, 'review')['routeCurrent'])
+
+    def test_dispatcher_is_excluded_even_if_it_has_an_old_route(self):
+        register_chat(self.home, 'dispatcher', RECEIVER)
+        register_chat(self.home, 'review', OTHER)
+        chat_with(self.home, SENDER, 'dispatcher', 'Share a link')
+        (self.home / 'state/codex-dispatcher.json').write_text(json.dumps({'threadId': RECEIVER}))
+        self.assertEqual(chat_with(self.home, SENDER)['registeredCodexNames'], ['review'])
+        self.assertFalse(chat_with(self.home, SENDER, 'dispatcher')['routeCurrent'])
+        with self.assertRaisesRegex(ValueError, 'dispatcher'):
+            chat_with(self.home, SENDER, 'dispatcher', 'Share a link')
