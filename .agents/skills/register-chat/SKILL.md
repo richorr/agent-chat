@@ -8,7 +8,8 @@ description: Register the current Codex chat for the shared agent-bridge dispatc
 Use the existing dispatcher; do not start another dispatcher, change its schedule,
 send test messages, or alter permission policy as part of registration.
 In Codex, the project is the incoming route name. Use the name supplied with
-`/register-chat NAME`, or the repository folder name when no name is supplied.
+`/register-chat NAME`, or the current chat's project folder name when no name
+is supplied. If the chat has no identifiable project folder, ask for a name.
 This opts the current chat into incoming dispatch for that name. A sending chat
 can discover it with `/chat-with`.
 

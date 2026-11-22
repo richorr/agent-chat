@@ -118,12 +118,13 @@ From the root of a permanent Agent Chat clone, run:
 
 ```sh
 mkdir -p "$HOME/.agents/skills"
-ln -s "$PWD/.agents/skills/chat-with" "$PWD/.agents/skills/register-chat" "$HOME/.agents/skills/"
+ln -sfn "$PWD/.agents/skills/chat-with" "$HOME/.agents/skills/chat-with"
+ln -sfn "$PWD/.agents/skills/register-chat" "$HOME/.agents/skills/register-chat"
 ```
 
 Both skills are available in other Codex projects. If an open chat's skill picker
-doesn't show them, start a new chat in that project. Keep the clone in place so
-the links can find the skills and bridge helper.
+doesn't show them, start a new chat in that project. If you move the clone,
+rerun the link commands from its new root.
 
 ## Test both directions
 
