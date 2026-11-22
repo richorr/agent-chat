@@ -99,11 +99,8 @@ session. You can also specify that name when saving a local alias. Connections
 bind to the registered recipient.
 If the name moves to another chat, confirm the new receiving chat when reconnecting.
 
-The skill lives in `.agents/skills/chat-with`. Send the command as chat text or
-select `$chat-with` in Codex's skill picker. To use the skill from other projects,
-expose the repository skill in your user-wide Codex skills directory (for example,
-symlink the skill directory so it can still locate the bridge helper). To have
-a sender consult these instructions on later work, add this line to that project's
+Send the command as chat text or select `$chat-with` in Codex's skill picker.
+To have a sender consult these instructions on later work, add this line to that project's
 `AGENTS.md`:
 
 > Before proposing cross-chat work, consult the current chat's saved connections
@@ -115,6 +112,19 @@ Saving a connection leaves incoming dispatch opt-in and sends no message.
 The skill checks the saved instructions during an active chat turn. The existing
 heartbeat handles Claude mailbox delivery and replies.
 
+### Use both Codex skills across projects
+
+From the root of a permanent Agent Chat clone, run:
+
+```sh
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/.agents/skills/chat-with" "$PWD/.agents/skills/register-chat" "$HOME/.agents/skills/"
+```
+
+Both skills are available in other Codex projects. If an open chat's skill picker
+doesn't show them, start a new chat in that project. Keep the clone in place so
+the links can find the skills and bridge helper.
+
 ## Test both directions
 
 Start with the [Codex dispatcher heartbeat](#2-attach-one-heartbeat) running
@@ -122,8 +132,9 @@ and its first successful poll complete.
 
 1. Follow the [Claude Code installation guide](claude/README.md#install-macos)
    from this clone. In a running Claude session, use `/register-chat claude-test`.
-   Open a second Codex chat in the Agent Chat project so it can use the
-   included skills. In that chat, use `/register-chat codex-test`.
+   Open a second Codex chat in the Agent Chat project, or in any project after
+   [installing both skills user-wide](#use-both-codex-skills-across-projects).
+   In that chat, use `/register-chat codex-test`.
 2. In `codex-test`, enter `/chat-with claude-test` with the instruction
    “When I ask for a bridge test, send only ‘Please reply ACK.’” Then ask for a
    bridge test and approve the displayed destination and message. Keep Claude

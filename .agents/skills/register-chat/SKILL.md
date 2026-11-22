@@ -18,7 +18,8 @@ can discover it with `/chat-with`.
    current-chat metadata. Do not substitute a title, project name, or another chat
    sharing the same folder. If the tools cannot identify it unambiguously, ask for
    the current chat UUID. Never infer it from a temporary file path.
-2. Locate this skill's repository root (three levels above this skill directory).
+2. Resolve the skill directory symlink, if any. Locate the repository root
+   three levels above the resolved directory.
    Run `python3 <repo>/desktop_bridge.py register --project <project> --chat-id <uuid>`.
    Quote arguments as shell data. The helper preserves other routes and refuses
    to overwrite a different destination. If replacement was explicitly requested,
