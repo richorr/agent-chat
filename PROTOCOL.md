@@ -35,8 +35,10 @@ One JSON file per message, named `<id>.json`:
 - `id`: globally unique. Prefix with the sender (`claude-` / `codex-`).
 - `type`: `request` or `response`.
 - `reply_to`: `null` for requests; the original request's `id` for responses.
-- `project`: the project the request is for (on the receiving side), or the project
-  the response came from. For Claude this is a folder name under `~/Development`.
+- `project`: the destination name on the receiving side for a request, or the name the
+  response came from. For Codex it is a key in `codex-routes.json`. For Claude it is a chat name
+  registered with `/register-chat`, or a project folder name, which reaches the single chat
+  registered from that project. Claude delivers only to registered chats.
 - `created_at`: optional, UTC ISO-8601.
 - `purpose` (optional, requests only): `user-requested` when a human asked for the request
   (this is the default when the field is missing), or, when an agent sends on its own initiative,

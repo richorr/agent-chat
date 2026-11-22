@@ -15,6 +15,10 @@ Commands:
   send     a Claude session asks Codex something:       send --type request --project P --origin <my session> --body-file F
            (add --purpose code-review|pr-fix|design-feedback when sending on your own initiative)
   policy   show / allow / deny / reset which self-initiated purposes each project may use (humans only)
+  register / unregister / chats
+           named Claude chats: a session claims a name and so opts into incoming dispatch
+  names / connect / connection / disconnect
+           a session's saved instructions for when to ask a named Codex chat something
   claim    archive one inbox file by hand (marks it processed, prints it)
   pending  list/get/done routing records
 """
@@ -39,7 +43,10 @@ TMP = os.path.join(ROOT, "tmp")
 STATE = os.path.join(ROOT, "state")
 PROCESSED = os.path.join(STATE, "claude-processed.txt")
 PENDING = os.path.join(STATE, "claude-pending.json")
-PENDING_LOCK = os.path.join(STATE, "claude-pending.lock")
+CHATS = os.path.join(STATE, "claude-chats.json")              # chat name -> registered Claude session
+CONNECTIONS = os.path.join(STATE, "claude-connections.json")  # session -> Codex name -> saved instructions
+CODEX_ROUTES = os.path.join(STATE, "codex-routes.json")       # Codex's names (read only here)
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 POLICY = os.path.join(ROOT, "claude-policy.json")  # human-owned config, edited with `policy` in a terminal
 USER_REQUESTED = "user-requested"
@@ -62,7 +69,7 @@ Follow the prompt exactly: route the one message you are given, then stop. Never
 """
 OUTBOUND_TTL = 24 * 3600  # forget an unanswered Claude -> Codex request after this long
 
-REQUEST_TEMPLATE = """[bridge-request {id}] Request from Codex for project {project}.
+REQUEST_TEMPLATE = """[bridge-request {id}] Request from Codex for chat {project}.
 
 {body}
 
@@ -73,9 +80,10 @@ Do not answer with SendMessage: the router that delivered this has already exite
 
 ROUTE_PROMPT = """You are a message router. Do exactly these steps and nothing else.
 1. Call ListAgents.
-2. Find the peer session for project "{project}". A session name is "<project>-<2 hex chars>": strip only the final "-xx"; the rest must equal "{project}" exactly (so "300-baud" does NOT match "300-baud-web-e8"). If several match, prefer "idle" over busy, then the most recently started.
-3. If one matches, call SendMessage once with "to" set to that exact name and "message" set to the text between the markers below, copied exactly.
-4. Your final output must be one line and nothing else: "ROUTED <name>", "NO_SESSION", or "FAILED <reason>".
+2. Look for a peer session whose name is exactly "{session}".{ref_rule} Never pick a session with any other name.
+3. If there is none, do nothing else; your final output is "OFFLINE".
+4. Otherwise call SendMessage once with "to" set to {to} and "message" set to the text between the markers below, copied exactly.
+5. Your final output must be one line and nothing else: "ROUTED {session}", "OFFLINE", or "FAILED <reason>".
 
 <<<MESSAGE
 {message}
@@ -101,7 +109,7 @@ def log(text):
 
 def atomic_write_json(path, data):
     tmp = os.path.join(TMP, ".%s.%s.tmp" % (os.path.basename(path), uuid.uuid4().hex[:6]))
-    with open(tmp, "w") as f:
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:  # private
         json.dump(data, f, indent=2)
         f.flush()
         os.fsync(f.fileno())
@@ -121,12 +129,17 @@ def mark_processed(msg_id):
         f.write(msg_id + "\n")
 
 
-def load_pending():
+def load_json(path):
     try:
-        with open(PENDING) as f:
-            return json.load(f)
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except (IOError, ValueError):
         return {}
+
+
+def load_pending():
+    return load_json(PENDING)
 
 
 def save_pending(data):
@@ -134,20 +147,24 @@ def save_pending(data):
 
 
 @contextlib.contextmanager
-def pending_txn():
-    """Read-modify-write the pending records under an exclusive lock shared by every bridge process
-    (serve, send, reply, pending), so concurrent writers cannot overwrite each other's changes.
-    Yields the records; saves them on exit if they changed. Never hold it across a router run."""
-    with open(PENDING_LOCK, "a") as lock:
+def json_txn(path):
+    """Read-modify-write a state file under an exclusive lock (<file>.lock) shared by every bridge
+    process, so concurrent writers cannot overwrite each other's changes. Yields the data; saves it
+    on exit if it changed. Never hold one across a router run."""
+    with open(os.path.splitext(path)[0] + ".lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            pending = load_pending()
-            before = json.dumps(pending, sort_keys=True)
-            yield pending
-            if json.dumps(pending, sort_keys=True) != before:
-                save_pending(pending)
+            data = load_json(path)
+            before = json.dumps(data, sort_keys=True)
+            yield data
+            if json.dumps(data, sort_keys=True) != before:
+                atomic_write_json(path, data)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def pending_txn():
+    return json_txn(PENDING)
 
 
 def inbox_files():
@@ -206,6 +223,47 @@ def new_message_id():
     return "claude-%s-%s" % (datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:8])
 
 
+def resolve_chat(target):
+    """Which registered Claude chat should receive a request addressed to `target`?
+
+    Codex puts the destination in the message's `project` field. A registered chat name matches
+    first; otherwise `target` is treated as a project folder name (what Codex has always sent) and
+    matches the one chat registered from a session of that project. Unregistered sessions never
+    receive requests. Returns (chat name, entry) or (None, error text)."""
+    chats = load_json(CHATS)
+    if target in chats:
+        return target, chats[target]
+    in_project = sorted(n for n, e in chats.items() if e.get("project") == target)
+    if len(in_project) == 1:
+        return in_project[0], chats[in_project[0]]
+    if in_project:
+        return None, ("'%s' matches several registered Claude chats (%s); address one of them by name"
+                      % (target, ", ".join(in_project)))
+    return None, ("no Claude chat is registered as '%s'. Run /register-chat %s in the Claude session "
+                  "that should receive it" % (target, target))
+
+
+def owner(entry):
+    """How a registration's owner is shown: 'name [ref]', or just 'name' for an old entry without a ref."""
+    return "%s [%s]" % (entry["session"], entry["ref"]) if entry.get("ref") else entry["session"]
+
+
+def same_owner(entry, session, ref):
+    """A recorded ref pins the registration to that exact session: a later session that reuses the
+    name (different or missing ref) is a different owner. An entry without a ref matches by name."""
+    return entry["session"] == session and (not entry.get("ref") or entry["ref"] == ref)
+
+
+def route_prompt(entry, message):
+    session, ref = entry["session"], entry.get("ref")
+    ref_rule, to = "", '"%s"' % session
+    if ref:  # pinned: the row must match name AND ref, even when it is the only row with that name
+        ref_rule = (' Its [ref] must also be exactly "%s". A row with that name but any other [ref] is a '
+                    'different session: treat it as not listed.' % ref)
+        to = '"%s [%s]"' % (session, ref)
+    return ROUTE_PROMPT.format(session=session, ref_rule=ref_rule, to=to, message=message)
+
+
 def write_message(msg_type, project, body, reply_to=None, purpose=None, msg_id=None):
     msg_id = msg_id or new_message_id()
     msg = {"id": msg_id, "reply_to": reply_to, "from": "claude", "to": "codex",
@@ -241,21 +299,27 @@ def fmt_cost(cost):
 # ---------------------------------------------------------------- serve
 
 def handle_request(msg):
-    project = msg.get("project") or ""
+    project = msg.get("project") or ""  # the name Codex addressed: a chat name or a project name
+    chat, entry = resolve_chat(project)
+    if chat is None:
+        write_message("response", project, "ERROR: " + entry, reply_to=msg["id"])
+        log("request %s rejected: %s" % (msg["id"], entry))
+        return
+    own_project = entry.get("project") or project_of_session(entry["session"])
     purpose = msg.get("purpose") or USER_REQUESTED
-    if purpose != USER_REQUESTED and purpose not in allowed_purposes(project):
+    if purpose != USER_REQUESTED and purpose not in allowed_purposes(own_project):
         reason = "Claude project %s does not accept self-initiated '%s' requests (allowed: %s)" % (
-            project, purpose, ", ".join(allowed_purposes(project)) or "none")
+            own_project, purpose, ", ".join(allowed_purposes(own_project)) or "none")
         write_message("response", project, "ERROR: " + reason, reply_to=msg["id"])
         log("request %s rejected by policy: %s" % (msg["id"], reason))
         return
     # Record the request *before* delivery: the session can answer (cmd_reply) while the router
     # run is still finishing, and that answer needs an open record to go through.
     with pending_txn() as pending:
-        pending[msg["id"]] = {"direction": "inbound", "project": project, "session": None,
+        pending[msg["id"]] = {"direction": "inbound", "project": project, "chat": chat, "session": None,
                               "created_at": now_iso(), "created_ts": time.time()}
-    text = REQUEST_TEMPLATE.format(id=msg["id"], project=project, body=msg.get("body", ""))
-    result, cost = run_router(ROUTE_PROMPT.format(project=project, message=text))
+    text = REQUEST_TEMPLATE.format(id=msg["id"], project=chat, body=msg.get("body", ""))
+    result, cost = run_router(route_prompt(entry, text))
     m = re.match(r"ROUTED\s+(\S+)", result)
     if m:
         with pending_txn() as pending:
@@ -265,8 +329,11 @@ def handle_request(msg):
         log("request %s -> %s%s%s" % (msg["id"], m.group(1), fmt_cost(cost),
                                       "" if rec is not None else " (already answered)"))
     else:
-        reason = ("no running Claude session for %s" % project) if result.startswith("NO_SESSION") \
-            else "could not deliver: %s" % result
+        if result.startswith("OFFLINE"):
+            reason = ("Claude chat '%s' is registered to session %s, which is offline. The request was not "
+                      "sent to any other session" % (chat, owner(entry)))
+        else:
+            reason = "could not deliver to Claude chat '%s' (session %s): %s" % (chat, owner(entry), result)
         with pending_txn() as pending:
             rec = pending.pop(msg["id"], None)
             if rec is not None:  # a session that got it anyway and answered wins over the error
@@ -410,6 +477,13 @@ def cmd_send(args):
             sys.exit("not allowed: project %s may not send self-initiated '%s' requests (allowed: %s). "
                      "Ask the user first, then send with --purpose user-requested."
                      % (own, purpose, ", ".join(allowed) or "none"))
+    if args.type == "request" and args.origin:
+        conn = load_json(CONNECTIONS).get(args.origin, {}).get(args.project)
+        if conn is not None:
+            status = connection_status(conn, args.project, load_json(CODEX_ROUTES))
+            if status != "ok":
+                sys.exit("not sent: your saved connection to '%s' is %s. Ask the user to reconnect "
+                         "(/chat-with %s) before using it." % (args.project, status, args.project))
     body = read_body(args)
     msg_id = new_message_id()
     if args.type == "request" and args.origin:
@@ -459,6 +533,128 @@ def cmd_policy(args):
         rule["self_initiated"] = [p for p in current if p not in args.purposes]
     atomic_write_json(POLICY, pol)
     print("%s: %s" % (target, ", ".join(rule["self_initiated"]) or "none"))
+
+
+# ---------------------------------------------------------------- named chats (receiving side)
+
+def check_name(name, what):
+    if not NAME_RE.match(name or ""):
+        sys.exit("invalid %s %r: use letters, digits, '.', '_' or '-' (max 64 characters)" % (what, name))
+
+
+def cmd_register(args):
+    check_name(args.chat, "chat name")
+    if not args.session:
+        sys.exit("--session <this session's name> is required (first line of ListAgents)")
+    with json_txn(CHATS) as chats:
+        cur = chats.get(args.chat)
+        mine = cur is not None and same_owner(cur, args.session, args.ref)
+        if cur and not mine and args.replace != owner(cur):
+            sys.exit("CLAIMED: '%s' is registered to session %s (since %s). Nothing changed. To move it here, "
+                     "confirm with the user, then rerun with --replace '%s'"
+                     % (args.chat, owner(cur), cur.get("registered_at", "?"), owner(cur)))
+        new = {"session": args.session, "ref": args.ref or None, "project": project_of_session(args.session),
+               "registered_at": cur["registered_at"] if mine else now_iso()}
+        chats[args.chat] = new
+    if cur and not mine:
+        print("MOVED: '%s' now delivers to %s (was %s)." % (args.chat, owner(new), owner(cur)))
+    elif cur:
+        print("UNCHANGED: '%s' already delivers to %s." % (args.chat, owner(new)))
+    else:
+        print("REGISTERED: '%s' now delivers to %s." % (args.chat, owner(new)))
+    others = sorted(n for n, e in load_json(CHATS).items() if e["session"] == args.session and n != args.chat)
+    if others:
+        print("This session also receives: %s" % ", ".join(others))
+
+
+def cmd_unregister(args):
+    with json_txn(CHATS) as chats:
+        cur = chats.get(args.chat)
+        if cur is None:
+            sys.exit("'%s' is not registered" % args.chat)
+        if not same_owner(cur, args.session, args.ref):
+            me = owner({"session": args.session, "ref": args.ref})
+            sys.exit("'%s' belongs to session %s, not %s; nothing changed" % (args.chat, owner(cur), me))
+        chats.pop(args.chat)
+    print("UNREGISTERED: '%s'. Codex requests for it now get an ERROR." % args.chat)
+
+
+def cmd_chats(args):
+    chats = load_json(CHATS)
+    if args.json:
+        print(json.dumps(chats, indent=2, sort_keys=True))
+        return
+    if not chats:
+        print("no Claude chats registered")
+    for n in sorted(chats):
+        e = chats[n]
+        print("%s -> %s%s (project %s, since %s)" % (n, e["session"], " [%s]" % e["ref"] if e.get("ref") else "",
+                                                     e.get("project"), e.get("registered_at")))
+
+
+# ---------------------------------------------------------------- connections (sending side)
+
+def connection_status(conn, name, routes):
+    if name not in routes:
+        return "missing (Codex no longer has a chat named '%s')" % name
+    return "ok" if routes[name] == conn.get("destination") else "reassigned (Codex moved '%s' to another chat)" % name
+
+
+def cmd_names(args):
+    routes = load_json(CODEX_ROUTES)
+    mine = load_json(CONNECTIONS).get(args.session, {}) if args.session else {}
+    print("Codex chats you can address: %s" % (", ".join(sorted(routes)) or "none"))
+    if not args.session:
+        return
+    if not mine:
+        print("No saved connections for %s." % args.session)
+    for n in sorted(mine):
+        first = (mine[n].get("instructions") or "").strip().splitlines() or [""]
+        print("connection %s [%s]: %s" % (n, connection_status(mine[n], n, routes), first[0][:100]))
+
+
+def cmd_connection(args):
+    conn = load_json(CONNECTIONS).get(args.session, {}).get(args.name)
+    if conn is None:
+        print("NONE: no saved connection to '%s' for %s." % (args.name, args.session))
+        return
+    print("connection %s [%s], saved %s\n\n%s" % (args.name, connection_status(conn, args.name, load_json(CODEX_ROUTES)),
+                                                 conn.get("saved_at"), conn.get("instructions", "").strip()))
+
+
+def cmd_connect(args):
+    """Save (or replace) this session's instructions for a Codex chat. Sends nothing, and does not
+    touch incoming dispatch."""
+    routes = load_json(CODEX_ROUTES)
+    if args.name not in routes:
+        sys.exit("unknown Codex chat '%s'. Known: %s" % (args.name, ", ".join(sorted(routes)) or "none"))
+    given = args.body is not None or args.body_file
+    text = read_body(args).strip() if (given or not args.reconnect) else None
+    if text == "":
+        sys.exit("no instructions given")
+    with json_txn(CONNECTIONS) as conns:
+        mine = conns.setdefault(args.session, {})
+        old = mine.get(args.name)
+        if args.reconnect:
+            if old is None:
+                sys.exit("no saved connection to '%s' to reconnect" % args.name)
+            text = text or old["instructions"]
+        elif old is not None and old.get("destination") != routes[args.name]:
+            # Never let new text quietly re-point a connection at a different Codex chat.
+            sys.exit("STALE: Codex moved '%s' to another chat since this connection was saved. Nothing changed. "
+                     "Ask the user to confirm the new destination, then rerun with --reconnect "
+                     "(add the new text to replace the instructions at the same time)." % args.name)
+        mine[args.name] = {"instructions": text, "destination": routes[args.name], "saved_at": now_iso()}
+    print("%s: connection %s for %s. Nothing was sent." % (
+        "RECONNECTED" if args.reconnect else ("REPLACED" if old else "SAVED"), args.name, args.session))
+
+
+def cmd_disconnect(args):
+    with json_txn(CONNECTIONS) as conns:
+        gone = conns.get(args.session, {}).pop(args.name, None)
+        if args.session in conns and not conns[args.session]:
+            conns.pop(args.session)
+    print("REMOVED" if gone else "NONE: no saved connection to '%s'" % args.name)
 
 
 def cmd_claim(args):
@@ -522,9 +718,46 @@ def main():
     pe.add_argument("action", choices=["get", "done", "list"])
     pe.add_argument("id", nargs="?")
 
+    rg = sub.add_parser("register", help="claim a chat name for a Claude session (opts it into incoming dispatch)")
+    rg.add_argument("chat")
+    rg.add_argument("--session", required=True, help="this session's name, from the first line of ListAgents")
+    rg.add_argument("--ref", help="this session's [ref] from ListAgents, to tell apart sessions with the same name")
+    rg.add_argument("--replace", metavar="OLD_OWNER",
+                    help="move the name from OLD_OWNER, exactly as CLAIMED printed it (only after the user agrees)")
+
+    ur = sub.add_parser("unregister")
+    ur.add_argument("chat")
+    ur.add_argument("--session", required=True)
+    ur.add_argument("--ref", help="this session's [ref] from ListAgents")
+
+    ch = sub.add_parser("chats", help="list registered Claude chats")
+    ch.add_argument("--json", action="store_true")
+
+    nm = sub.add_parser("names", help="Codex chat names, plus this session's saved connections")
+    nm.add_argument("--session")
+
+    co = sub.add_parser("connect", help="save/replace instructions for a Codex chat (sends nothing)")
+    co.add_argument("name")
+    co.add_argument("--session", required=True)
+    co.add_argument("--body", help="the instructions")
+    co.add_argument("--body-file")
+    co.add_argument("--reconnect", action="store_true",
+                    help="accept Codex's current destination for the name (keeps the instructions unless new text is given)")
+
+    cs = sub.add_parser("connection", help="show this session's saved instructions for a Codex chat")
+    cs.add_argument("name")
+    cs.add_argument("--session", required=True)
+
+    dc = sub.add_parser("disconnect")
+    dc.add_argument("name")
+    dc.add_argument("--session", required=True)
+
     args = p.parse_args()
     handlers = {"serve": cmd_serve, "reply": cmd_reply, "send": cmd_send,
-                "claim": cmd_claim, "pending": cmd_pending, "policy": cmd_policy}
+                "claim": cmd_claim, "pending": cmd_pending, "policy": cmd_policy,
+                "register": cmd_register, "unregister": cmd_unregister, "chats": cmd_chats,
+                "names": cmd_names, "connect": cmd_connect, "connection": cmd_connection,
+                "disconnect": cmd_disconnect}
     if args.cmd not in handlers:
         p.print_help()
         sys.exit(1)
