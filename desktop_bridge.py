@@ -69,6 +69,7 @@ class DesktopBridge(Bridge):
         try:
             row = self.db.execute('SELECT * FROM incoming WHERE id=?', (ident,)).fetchone()
             if row and row['status'] == 'sender-received':
+                self.db.rollback()
                 return {'status': 'sender-received'}
             if not row or row['status'] != 'pending':
                 raise ValueError('not pending; inspect destination history, never resend a claimed message')

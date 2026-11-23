@@ -101,6 +101,7 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(self.b.check_reply(first, 'origin-chat'), {'status': 'handled'})
             self.assertEqual(self.b.check_reply(second, 'origin-chat')['status'], 'received')
             self.assertEqual(dispatcher.claim('claude-second'), {'status': 'sender-received'})
+            self.assertFalse(dispatcher.db.in_transaction)
         finally:
             dispatcher.db.close()
     def test_invalid_json_is_archived(self):
