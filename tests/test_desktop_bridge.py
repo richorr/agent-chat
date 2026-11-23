@@ -71,6 +71,39 @@ class MailboxTests(unittest.TestCase):
         self.b.scan(); self.assertEqual(self.b.claim('claude-one')['threadId'], 'origin-chat')
         self.b.complete('claude-one', 'Delivered')
         self.assertEqual(len(list((self.home / 'to-claude').glob('*.json'))), 1)
+
+    def test_sender_checks_only_its_matching_reply(self):
+        ident = self.b.send('demo', 'question', 'origin-chat')
+        self.incoming()
+        self.incoming('claude-wrong', type='response', reply_to=ident, project='different')
+        self.assertEqual(self.b.check_reply(ident, 'origin-chat'), {'status': 'pending'})
+        self.incoming('claude-answer', type='response', reply_to=ident, body='answer')
+        with self.assertRaisesRegex(ValueError, 'no matching request'):
+            self.b.check_reply(ident, 'other-chat')
+        self.assertEqual(self.b.check_reply(ident, 'origin-chat'),
+                         {'status': 'received', 'body': 'answer'})
+        self.assertEqual(self.b.check_reply(ident, 'origin-chat'),
+                         {'status': 'received', 'body': 'answer'})
+        self.assertEqual({path.stem for path in (self.home / 'to-codex').glob('*.json')},
+                         {'claude-one', 'claude-wrong'})
+        self.assertEqual([action['id'] for action in self.b.scan()['actions']], ['claude-one'])
+
+    def test_sender_and_dispatcher_share_reply_claim(self):
+        first = self.b.send('demo', 'first', 'origin-chat')
+        second = self.b.send('demo', 'second', 'origin-chat')
+        self.incoming('claude-first', type='response', reply_to=first)
+        self.incoming('claude-second', type='response', reply_to=second)
+        dispatcher = DesktopBridge(self.home, {'demo': 'chat-123'})
+        try:
+            self.assertEqual({action['id'] for action in dispatcher.scan()['actions']},
+                             {'claude-first', 'claude-second'})
+            dispatcher.claim('claude-first')
+            self.assertEqual(self.b.check_reply(first, 'origin-chat'), {'status': 'handled'})
+            self.assertEqual(self.b.check_reply(second, 'origin-chat')['status'], 'received')
+            self.assertEqual(dispatcher.claim('claude-second'), {'status': 'sender-received'})
+            self.assertFalse(dispatcher.db.in_transaction)
+        finally:
+            dispatcher.db.close()
     def test_invalid_json_is_archived(self):
         (self.home / 'to-codex/bad.json').write_text('{')
         self.assertEqual(self.b.scan()['actions'], [])

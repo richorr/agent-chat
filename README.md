@@ -44,7 +44,9 @@ Claude session to review PRs from Codex:
 3. When the PR is ready, tell the sending chat. Review the destination and
    exact message it proposes, then approve the send. Claude's dispatcher
    delivers the request. Codex's dispatcher posts the reply in the sending
-   Codex chat on a heartbeat check once that chat is idle.
+   Codex chat on a heartbeat check once that chat is idle. If you're waiting
+   in the sending chat, ask it to check the bridge reply by request ID. It can
+   pick up a reply that's already in the mailbox during the current turn.
 
 `/chat-with backend-review` shows the saved instructions. Include new text
 to replace them. Saving only records instructions for that sender. It sends

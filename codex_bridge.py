@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared durable mailbox primitives; no network or model calls."""
 import hashlib
+import fcntl
 import json
 import logging
 import os
@@ -78,7 +79,12 @@ class Bridge:
         if msg['type'] == 'response' and not isinstance(msg.get('reply_to'), str):
             raise ValueError('response requires reply_to')
 
-    def ingest(self):
+    def ingest(self, match=None):
+        with (self.home / 'state/codex-inbox.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self._ingest(match)
+
+    def _ingest(self, match):
         for path in sorted((self.home / 'to-codex').glob('*.json')):
             if path.name.startswith('.') or path.is_symlink():
                 continue
@@ -88,8 +94,12 @@ class Bridge:
                 msg = json.loads(path.read_text())
                 self.validate(msg)
             except (ValueError, OSError) as exc:
+                if match is not None:
+                    continue
                 logging.error('Invalid inbox file %s: %s', path.name, exc)
                 path.rename(self.home / 'archive' / ('codex-invalid-' + uuid.uuid4().hex + '.json'))
+                continue
+            if match is not None and not match(msg):
                 continue
             self.save('INSERT OR IGNORE INTO incoming(id,message,status,started) VALUES (?,?,?,?)',
                       (msg['id'], json.dumps(msg), 'pending', time.time()))
