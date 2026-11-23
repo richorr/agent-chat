@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sqlite3
 import time
 import tempfile
 import uuid
@@ -33,7 +34,7 @@ class DesktopBridge(Bridge):
         self.ingest()
         self.flush()
         actions = []
-        for row in self.db.execute("SELECT * FROM incoming WHERE status!='done'").fetchall():
+        for row in self.db.execute("SELECT * FROM incoming WHERE status NOT IN ('done', 'sender-received')").fetchall():
             msg = json.loads(row['message'])
             thread = row['thread']
             if row['status'] == 'pending':
@@ -41,6 +42,8 @@ class DesktopBridge(Bridge):
                     thread = self.routes.get(msg['project'])
                 else:
                     origin = self.db.execute('SELECT * FROM outgoing WHERE id=?', (msg['reply_to'],)).fetchone()
+                    if origin and origin['response_id'] == row['id']:
+                        continue
                     if origin and origin['project'] == msg['project'] and not origin['response_id']:
                         thread = origin['thread']
                 if not thread:
@@ -65,6 +68,8 @@ class DesktopBridge(Bridge):
         self.db.execute('BEGIN IMMEDIATE')
         try:
             row = self.db.execute('SELECT * FROM incoming WHERE id=?', (ident,)).fetchone()
+            if row and row['status'] == 'sender-received':
+                return {'status': 'sender-received'}
             if not row or row['status'] != 'pending':
                 raise ValueError('not pending; inspect destination history, never resend a claimed message')
             msg = json.loads(row['message'])
@@ -88,9 +93,8 @@ class DesktopBridge(Bridge):
         return {'threadId': thread, 'prompt': '[agent-bridge ' + ident + ']\n' + prefix + '\n\n' + msg['body']}
 
     def check_reply(self, request_id, origin):
-        request = self.db.execute('SELECT * FROM outgoing WHERE id=? AND thread=?',
-                                  (request_id, origin)).fetchone()
-        if request is None:
+        request = self.db.execute('SELECT * FROM outgoing WHERE id=?', (request_id,)).fetchone()
+        if request is None or not same_chat(request['thread'], origin):
             raise ValueError('no matching request from this chat')
 
         def matches(message):
@@ -104,13 +108,20 @@ class DesktopBridge(Bridge):
             response_id = self.db.execute('SELECT response_id FROM outgoing WHERE id=?',
                                           (request_id,)).fetchone()['response_id']
             if response_id:
+                # Older sender checks used 'done' without assigning a destination.
+                received = self.db.execute(
+                    """SELECT message FROM incoming WHERE id=? AND
+                    (status='sender-received' OR (status='done' AND thread IS NULL))""",
+                    (response_id,)).fetchone()
+                if received:
+                    return {'status': 'received', 'body': json.loads(received['message'])['body']}
                 return {'status': 'handled'}
             for row in self.db.execute("SELECT id, message FROM incoming WHERE status='pending' ORDER BY started, id"):
                 message = json.loads(row['message'])
                 if matches(message):
                     self.db.execute('UPDATE outgoing SET response_id=? WHERE id=?',
                                     (row['id'], request_id))
-                    self.db.execute("UPDATE incoming SET status='done' WHERE id=?", (row['id'],))
+                    self.db.execute("UPDATE incoming SET status='sender-received' WHERE id=?", (row['id'],))
                     return {'status': 'received', 'body': message['body']}
         return {'status': 'pending'}
 
@@ -121,6 +132,17 @@ class DesktopBridge(Bridge):
         self.finish(row, body)
         self.flush()
         return {'completed': ident}
+
+
+def same_chat(first, second):
+    if first == second:
+        return True
+    if not first or not second:
+        return False
+    try:
+        return uuid.UUID(first) == uuid.UUID(second)
+    except ValueError:
+        return False
 
 
 def read_json(config):
@@ -265,10 +287,10 @@ def main():
     c.add_argument('--dispatcher-chat-id', type=uuid.UUID)
     c = sub.add_parser('claim', allow_abbrev=False); c.add_argument('id')
     c = sub.add_parser('complete', allow_abbrev=False); c.add_argument('id'); c.add_argument('--body-file', type=Path, required=True)
-    c = sub.add_parser('send', allow_abbrev=False); c.add_argument('--project', required=True); c.add_argument('--origin', required=True); c.add_argument('--body-file', type=Path, required=True)
+    c = sub.add_parser('send', allow_abbrev=False); c.add_argument('--project', required=True); c.add_argument('--origin', type=uuid.UUID, required=True); c.add_argument('--body-file', type=Path, required=True)
     c = sub.add_parser('check-reply', allow_abbrev=False)
     c.add_argument('request_id')
-    c.add_argument('--origin', required=True)
+    c.add_argument('--origin', type=uuid.UUID, required=True)
     c = sub.add_parser('register', allow_abbrev=False)
     c.add_argument('--project', required=True)
     c.add_argument('--chat-id', required=True)
@@ -299,8 +321,9 @@ def main():
             p.exit(1, f'{exc}\n')
         print(json.dumps(result))
         return
-    b = DesktopBridge(args.home)
+    b = None
     try:
+        b = DesktopBridge(args.home)
         if args.command == 'scan':
             if args.dispatcher_chat_id:
                 config = args.home / 'state/codex-dispatcher.json'
@@ -310,12 +333,17 @@ def main():
             result = b.scan()
         elif args.command == 'claim': result = b.claim(args.id)
         elif args.command == 'complete': result = b.complete(args.id, args.body_file.read_text())
-        elif args.command == 'check-reply': result = b.check_reply(args.request_id, args.origin)
-        else: result = {'id': b.send(args.project, args.body_file.read_text(), args.origin)}
+        elif args.command == 'check-reply': result = b.check_reply(args.request_id, str(args.origin))
+        else: result = {'id': b.send(args.project, args.body_file.read_text(), str(args.origin))}
         print(json.dumps(result))
     except ValueError as exc:
         p.exit(1, f'{exc}\n')
+    except sqlite3.OperationalError as exc:
+        if args.command != 'check-reply' or str(exc) != 'database is locked':
+            raise
+        p.exit(1, 'Bridge database is busy. Try the reply check again shortly.\n')
     finally:
-        b.db.close()
+        if b is not None:
+            b.db.close()
 
 if __name__ == '__main__': main()

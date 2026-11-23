@@ -82,7 +82,8 @@ class MailboxTests(unittest.TestCase):
             self.b.check_reply(ident, 'other-chat')
         self.assertEqual(self.b.check_reply(ident, 'origin-chat'),
                          {'status': 'received', 'body': 'answer'})
-        self.assertEqual(self.b.check_reply(ident, 'origin-chat'), {'status': 'handled'})
+        self.assertEqual(self.b.check_reply(ident, 'origin-chat'),
+                         {'status': 'received', 'body': 'answer'})
         self.assertEqual({path.stem for path in (self.home / 'to-codex').glob('*.json')},
                          {'claude-one', 'claude-wrong'})
         self.assertEqual([action['id'] for action in self.b.scan()['actions']], ['claude-one'])
@@ -94,12 +95,12 @@ class MailboxTests(unittest.TestCase):
         self.incoming('claude-second', type='response', reply_to=second)
         dispatcher = DesktopBridge(self.home, {'demo': 'chat-123'})
         try:
-            dispatcher.scan()
+            self.assertEqual({action['id'] for action in dispatcher.scan()['actions']},
+                             {'claude-first', 'claude-second'})
             dispatcher.claim('claude-first')
             self.assertEqual(self.b.check_reply(first, 'origin-chat'), {'status': 'handled'})
             self.assertEqual(self.b.check_reply(second, 'origin-chat')['status'], 'received')
-            with self.assertRaisesRegex(ValueError, 'not pending'):
-                dispatcher.claim('claude-second')
+            self.assertEqual(dispatcher.claim('claude-second'), {'status': 'sender-received'})
         finally:
             dispatcher.db.close()
     def test_invalid_json_is_archived(self):
