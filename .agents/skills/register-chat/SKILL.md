@@ -8,7 +8,8 @@ description: Register the current Codex chat for the shared agent-bridge dispatc
 Use the existing dispatcher; do not start another dispatcher, change its schedule,
 send test messages, or alter permission policy as part of registration.
 In Codex, the project is the incoming route name. Use the name supplied with
-`/register-chat NAME`, or the repository folder name when no name is supplied.
+`/register-chat NAME`, or the current chat's project folder name when no name
+is supplied. If the chat has no identifiable project folder, ask for a name.
 This opts the current chat into incoming dispatch for that name. A sending chat
 can discover it with `/chat-with`.
 
@@ -18,7 +19,8 @@ can discover it with `/chat-with`.
    current-chat metadata. Do not substitute a title, project name, or another chat
    sharing the same folder. If the tools cannot identify it unambiguously, ask for
    the current chat UUID. Never infer it from a temporary file path.
-2. Locate this skill's repository root (three levels above this skill directory).
+2. Resolve the skill directory symlink, if any. Locate the repository root
+   three levels above the resolved directory.
    Run `python3 <repo>/desktop_bridge.py register --project <project> --chat-id <uuid>`.
    Quote arguments as shell data. The helper preserves other routes and refuses
    to overwrite a different destination. If replacement was explicitly requested,
