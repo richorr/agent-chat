@@ -30,8 +30,8 @@ Use `/register-chat` in the chat that should **receive** requests. Use
 Claude session to review PRs from Codex:
 
 1. In the receiving Claude session, run `/register-chat backend-review`.
-   This gives that session a name and opts it into incoming dispatch. Use a
-   work chat for registration and reserve the dispatcher chat for delivery.
+   This gives that session a name and opts it into incoming dispatch. If you
+   restart the Claude session, register it again so it can receive requests.
 2. In the sending Codex chat, run `/chat-with` to see available names and
    saved connections. Then enter the name and instructions in one message:
 
@@ -42,22 +42,29 @@ Claude session to review PRs from Codex:
    ```
 
 3. When the PR is ready, tell the sending chat. Review the destination and
-   exact message it proposes, then approve the send. The dispatcher delivers
-   the request and brings the reply back to the sending chat.
+   exact message it proposes, then approve the send. Claude's dispatcher
+   delivers the request. Codex's dispatcher posts the reply in the sending
+   Codex chat on a heartbeat check once that chat is idle.
 
 `/chat-with backend-review` shows the saved instructions. Include new text
 to replace them. Saving only records instructions for that sender. It sends
 no message and grants no incoming access. If the name moves to another chat,
 confirm the new recipient before reconnecting.
 
-For requests from Claude to Codex, register a name in the receiving Codex
-chat and save the connection in the sending Claude session. For requests
-between two Codex chats, use the same commands. Codex delivers those directly,
-and the reply stays in the receiving chat.
+- **Claude → Codex.** Register a Codex work chat and save the connection in
+  the sending Claude session. The Codex dispatcher delivers on a heartbeat
+  check once the work chat is idle. Keep the sending Claude session running
+  to receive the answer there as a `[codex-reply <id>]` message.
+- **Codex → Codex.** Register the receiving work chat and save the connection
+  in the sender. The sending chat delivers directly and the answer stays in
+  the receiving chat.
+- **Claude → Claude.** Use Claude's native cross-session messaging.
 
 The instructions apply during an active turn in the sending chat. To have Codex
 consult saved connections during later work, add the
 [example instruction to that project's AGENTS.md](SETUP.md#connect-from-a-sending-chat).
+For Claude, the [installer's `CLAUDE.md` step](claude/README.md#install-macos)
+adds the standing instructions for using saved connections.
 
 ## How it works
 
