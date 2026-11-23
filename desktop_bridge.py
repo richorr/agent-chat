@@ -87,6 +87,33 @@ class DesktopBridge(Bridge):
             raise
         return {'threadId': thread, 'prompt': '[agent-bridge ' + ident + ']\n' + prefix + '\n\n' + msg['body']}
 
+    def check_reply(self, request_id, origin):
+        request = self.db.execute('SELECT * FROM outgoing WHERE id=? AND thread=?',
+                                  (request_id, origin)).fetchone()
+        if request is None:
+            raise ValueError('no matching request from this chat')
+
+        def matches(message):
+            return (message['type'] == 'response' and message['reply_to'] == request_id
+                    and message['project'] == request['project'])
+
+        if not request['response_id']:
+            self.ingest(matches)
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            response_id = self.db.execute('SELECT response_id FROM outgoing WHERE id=?',
+                                          (request_id,)).fetchone()['response_id']
+            if response_id:
+                return {'status': 'handled'}
+            for row in self.db.execute("SELECT id, message FROM incoming WHERE status='pending' ORDER BY started, id"):
+                message = json.loads(row['message'])
+                if matches(message):
+                    self.db.execute('UPDATE outgoing SET response_id=? WHERE id=?',
+                                    (row['id'], request_id))
+                    self.db.execute("UPDATE incoming SET status='done' WHERE id=?", (row['id'],))
+                    return {'status': 'received', 'body': message['body']}
+        return {'status': 'pending'}
+
     def complete(self, ident, body):
         row = self.db.execute('SELECT * FROM incoming WHERE id=?', (ident,)).fetchone()
         if not row or row['status'] != 'desktop-claimed':
@@ -239,6 +266,9 @@ def main():
     c = sub.add_parser('claim', allow_abbrev=False); c.add_argument('id')
     c = sub.add_parser('complete', allow_abbrev=False); c.add_argument('id'); c.add_argument('--body-file', type=Path, required=True)
     c = sub.add_parser('send', allow_abbrev=False); c.add_argument('--project', required=True); c.add_argument('--origin', required=True); c.add_argument('--body-file', type=Path, required=True)
+    c = sub.add_parser('check-reply', allow_abbrev=False)
+    c.add_argument('request_id')
+    c.add_argument('--origin', required=True)
     c = sub.add_parser('register', allow_abbrev=False)
     c.add_argument('--project', required=True)
     c.add_argument('--chat-id', required=True)
@@ -280,8 +310,11 @@ def main():
             result = b.scan()
         elif args.command == 'claim': result = b.claim(args.id)
         elif args.command == 'complete': result = b.complete(args.id, args.body_file.read_text())
+        elif args.command == 'check-reply': result = b.check_reply(args.request_id, args.origin)
         else: result = {'id': b.send(args.project, args.body_file.read_text(), args.origin)}
         print(json.dumps(result))
+    except ValueError as exc:
+        p.exit(1, f'{exc}\n')
     finally:
         b.db.close()
 
